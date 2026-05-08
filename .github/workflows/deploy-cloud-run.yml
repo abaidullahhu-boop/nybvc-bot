@@ -1,0 +1,101 @@
+name: Deploy to Cloud Run
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v2
+
+      - name: Authenticate with Google Cloud
+        uses: google-github-actions/auth@v0
+        with:
+          credentials_json: ${{ secrets.GCP_CREDENTIALS }}
+
+      - name: Set up Google Cloud SDK
+        run: |
+          gcloud --quiet auth configure-docker us-east1-docker.pkg.dev
+
+      - name: Enable required APIs
+        run: |
+          gcloud services enable run.googleapis.com artifactregistry.googleapis.com cloudbuild.googleapis.com cloudscheduler.googleapis.com
+
+      - name: Create Artifact Registry repository if not exists
+        run: |
+          if ! gcloud artifacts repositories describe nyc-building-bot --location=us-east1; then
+            gcloud artifacts repositories create nyc-building-bot --repository-format=docker --location=us-east1 --description="Docker repository for NYC Building Bot"
+          fi
+
+      - name: Create service account if not exists
+        run: |
+          if ! gcloud iam service-accounts describe cloud-run-scheduler@ny-building-bot.iam.gserviceaccount.com; then
+            gcloud iam service-accounts create cloud-run-scheduler --display-name="Cloud Run Scheduler"
+          fi
+          gcloud projects add-iam-policy-binding ny-building-bot --member="serviceAccount:cloud-run-scheduler@ny-building-bot.iam.gserviceaccount.com" --role="roles/run.invoker"
+
+      - name: Create credentials files
+        run: |
+          echo "${{ secrets.GOOGLE_SHEET_CREDENTIALS }}" | base64 -d > google-sheet-credentials.json
+          echo "${{ secrets.GOOGLE_DATASTORE_CREDENTIALS }}" | base64 -d > google-datastore-credentials.json
+
+      - name: Create .env.yaml
+        run: |
+          cat <<EOF > .env.yaml
+          RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
+          FROM_EMAIL: ${{ secrets.FROM_EMAIL }}
+          GOOGLE_AI_API_KEY: ${{ secrets.GOOGLE_AI_API_KEY }}
+          GOOGLE_SHEET_CREDENTIALS_PATH: /app/google-sheet-credentials.json
+          GOOGLE_DATASTORE_CREDENTIALS_PATH: /app/google-datastore-credentials.json
+          PROJECT1_GOOGLE_SHEET_ID: ${{ secrets.PROJECT1_GOOGLE_SHEET_ID }}
+          PROJECT2_GOOGLE_SHEET_ID: ${{ secrets.PROJECT2_GOOGLE_SHEET_ID }}
+          PROJECT2_GOOGLE_SHEET_NAME: ${{ secrets.PROJECT2_GOOGLE_SHEET_NAME }}
+          GCP_PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
+          GCP_LOCATION: ${{ secrets.GCP_LOCATION }}
+          CLOUD_TASKS_QUEUE_NAME: ${{ secrets.CLOUD_TASKS_QUEUE_NAME }}
+          CLOUD_TASKS_SERVICE_ACCOUNT: ${{ secrets.CLOUD_TASKS_SERVICE_ACCOUNT }}
+          SERVICE_URL: ${{ secrets.SERVICE_URL }}
+          RUN_HTTP_SERVER: "true"
+          HTTP_PROXY: "${{ secrets.HTTP_PROXY }}"
+          HTTPS_PROXY: "${{ secrets.HTTPS_PROXY }}"
+          EOF
+
+      - name: Build and push Docker image (no cache, fresh Chrome)
+        run: |
+          IMAGE=us-east1-docker.pkg.dev/ny-building-bot/nyc-building-bot/app
+          TAG=latest
+          SHA_TAG=${GITHUB_SHA}
+          docker build --pull --no-cache -t "$IMAGE:$TAG" -t "$IMAGE:$SHA_TAG" .
+          docker push "$IMAGE:$TAG"
+          docker push "$IMAGE:$SHA_TAG"
+
+      - name: Deploy to Cloud Run
+        env:
+          IMAGE: us-east1-docker.pkg.dev/ny-building-bot/nyc-building-bot/app
+          SHA_TAG: ${{ github.sha }}
+        run: |
+          gcloud run deploy nyc-building-bot \
+            --image "$IMAGE:$SHA_TAG" \
+            --region us-east1 --platform managed \
+            --cpu 2 --memory 8Gi --timeout 3600 \
+            --env-vars-file .env.yaml \
+            --vpc-connector bot-serverless-conn --vpc-egress all-traffic \
+            --no-allow-unauthenticated --min-instances 0 --max-instances 1 --cpu-throttling
+
+      - name: Get Cloud Run service URL
+        id: get_url
+        run: |
+          URL=$(gcloud run services describe nyc-building-bot --region us-east1 --format="value(status.url)")
+          echo "url=$URL" >> $GITHUB_OUTPUT
+
+      - name: Create or update Cloud Scheduler job
+        run: |
+          if gcloud scheduler jobs describe daily-tasks --location=us-east1; then
+            gcloud scheduler jobs update http daily-tasks --schedule="30 7 * * *" --uri="${{ steps.get_url.outputs.url }}/trigger" --http-method=POST --time-zone="America/New_York" --location=us-east1 --oidc-service-account-email="cloud-run-scheduler@ny-building-bot.iam.gserviceaccount.com"
+          else
+            gcloud scheduler jobs create http daily-tasks --schedule="30 7 * * *" --uri="${{ steps.get_url.outputs.url }}/trigger" --http-method=POST --time-zone="America/New_York" --location=us-east1 --oidc-service-account-email="cloud-run-scheduler@ny-building-bot.iam.gserviceaccount.com"
+          fi

@@ -1,0 +1,7 @@
+indexes:
+  - kind: SentViolation
+    properties:
+      - name: email
+      - name: bin
+      - name: violation_type
+      - name: violation_id
