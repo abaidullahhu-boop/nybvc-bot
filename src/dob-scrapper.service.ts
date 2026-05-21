@@ -572,7 +572,16 @@ export class DobScraperService {
   private savePdfBuffer(buffer: Buffer): string {
     const pdfPath = `temp_${Date.now()}.pdf`;
     fs.writeFileSync(pdfPath, buffer);
-    console.log(`PDF downloaded successfully to ${pdfPath}`);
+    const sizeKb = (buffer.byteLength / 1024).toFixed(1);
+    const header = buffer.slice(0, 5).toString('ascii');
+    const isPdf = header.startsWith('%PDF');
+    console.log(
+      `PDF downloaded successfully to ${pdfPath} | size=${sizeKb}KB | header="${header}" | isPDF=${isPdf}`,
+    );
+    if (!isPdf) {
+      const preview = buffer.slice(0, 300).toString('utf8').replace(/\n/g, ' ');
+      console.warn(`Non-PDF content received. Preview: ${preview}`);
+    }
     return pdfPath;
   }
 
