@@ -20,7 +20,7 @@ export class GeminiService {
     this.genAI = new GoogleGenerativeAI(apiKey);
     this.fileManager = new GoogleAIFileManager(apiKey);
     this.model = this.genAI.getGenerativeModel({
-      model: 'gemini-2.5-flash-lite',
+      model: 'gemini-2.0-flash',
     });
     this.generationConfig = {
       temperature: 0,
