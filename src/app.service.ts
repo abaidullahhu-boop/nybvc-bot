@@ -13,6 +13,11 @@ import {
 } from './types';
 import { DobScraperService } from './dob-scrapper.service';
 import { GoogleSheetService } from './google-sheet.service';
+import {
+  formatReasonFromNotes,
+  hasAnyContact,
+  mergeContact,
+} from './contact-extraction.types';
 import { Datastore } from '@google-cloud/datastore';
 import * as moment from 'moment-timezone';
 
@@ -85,7 +90,7 @@ export class AppService {
         await this.googleSheetService.createSheet(sheetId, sheetName);
         // Add header row
         await this.googleSheetService.appendRow(sheetId, sheetName, [
-          ['BIN', 'Email', 'Phone', 'Name'],
+          ['BIN', 'Email', 'Phone', 'Name', 'Denied URL', 'Reason'],
         ]);
         console.log(`Created new sheet for ${sheetName} with headers`);
       } else {
@@ -98,53 +103,41 @@ export class AppService {
         const waitTime = Math.floor(Math.random() * 120000) + 60000; // 1 minute to 3 minutes
         console.log(`Waiting for ${waitTime / 60000} minutes...`);
         await new Promise((resolve) => setTimeout(resolve, waitTime));
-        let contactInfo = await this.dobScraperService.getBisContactInfo(bin);
-        const bisContactInfo = { ...contactInfo }; // Save original BIS contact info
+        const bisOutcome = await this.dobScraperService.getBisContactInfo(bin);
+        let contact = { ...bisOutcome.contact };
+        const mergedNotes = [...bisOutcome.notes];
+        let deniedUrl = bisOutcome.deniedUrl || '';
 
-        // Check if any contact info is missing
-        if (
-          !contactInfo ||
-          !contactInfo.email ||
-          !contactInfo.phoneNumber ||
-          !contactInfo.name
-        ) {
-          // Get DOB Now info
-          const dobNowContactInfo =
-            await this.dobScraperService.scrapeDobNow(bin);
+        const needsEmail = !contact.email?.trim();
+        const needsMore =
+          needsEmail || !contact.phoneNumber?.trim() || !contact.name?.trim();
 
-          // Merge the results, keeping BIS values if DOB Now returns empty
-          contactInfo = {
-            email: dobNowContactInfo?.email || bisContactInfo?.email || '',
-            phoneNumber:
-              dobNowContactInfo?.phoneNumber ||
-              bisContactInfo?.phoneNumber ||
-              '',
-            name: dobNowContactInfo?.name || bisContactInfo?.name || '',
-          };
+        if (needsMore) {
+          const dobNowOutcome = await this.dobScraperService.scrapeDobNow(bin);
+          contact = mergeContact(contact, dobNowOutcome.contact);
+          mergedNotes.push(...dobNowOutcome.notes);
+          if (!deniedUrl && dobNowOutcome.deniedUrl) {
+            deniedUrl = dobNowOutcome.deniedUrl;
+          }
         }
 
-        const email = contactInfo?.email || '';
-        const phone = contactInfo?.phoneNumber || '';
-        const name = contactInfo?.name || '';
+        const email = contact.email || '';
+        const phone = contact.phoneNumber || '';
+        const name = contact.name || '';
+        const reason =
+          mergedNotes.length > 0 ? formatReasonFromNotes(mergedNotes) : '';
 
         const row = [bin];
-        if (email !== 'string' && email !== '') {
-          row.push(email);
-        } else {
-          row.push('Email not found');
-        }
-        if (phone !== 'string' && phone !== '') {
-          row.push(phone);
-        } else {
-          row.push('Phone not found');
-        }
-        if (name !== 'string' && name !== '') {
-          row.push(name);
-        } else {
-          row.push('Name not found');
-        }
+        row.push(email !== 'string' && email !== '' ? email : 'Email not found');
+        row.push(phone !== 'string' && phone !== '' ? phone : 'Phone not found');
+        row.push(name !== 'string' && name !== '' ? name : 'Name not found');
+        row.push(deniedUrl || '');
+        row.push(reason);
+
         await this.googleSheetService.appendRow(sheetId, sheetName, [row]);
-        console.log(`Appended row for BIN ${bin}: [${row.join(', ')}]`);
+        console.log(
+          `Appended row for BIN ${bin}: [${row.join(', ')}] | hasContact=${hasAnyContact(contact)}`,
+        );
       }
     } catch (error) {
       console.error('Project 1 workflow failed:', error);

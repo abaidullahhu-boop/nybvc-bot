@@ -4,9 +4,15 @@ import {
   Page,
   ElementHandle,
   BrowserContext,
+  Response,
 } from 'patchright';
 import * as fs from 'fs';
 import { GeminiService } from './gemini.service';
+import {
+  ContactExtractionOutcome,
+  DiagnosticNote,
+  hasAnyContact,
+} from './contact-extraction.types';
 
 /**
  * Service for scraping information from NYC Department of Buildings (DOB) websites
@@ -71,7 +77,8 @@ export class DobScraperService {
 
     if (!this.context) {
       this.context = await this.browser.newContext({
-        viewport: null,
+        viewport: { width: 1920, height: 1080 },
+        locale: 'en-US',
       });
     }
     const page = await this.context.newPage();
@@ -84,6 +91,13 @@ export class DobScraperService {
    * Save a quick diagnostic screenshot + first part of the HTML to logs
    */
   private async debugPage(page: Page, label: string) {
+    await this.debugPageReturnPath(page, label);
+  }
+
+  private async debugPageReturnPath(
+    page: Page,
+    label: string,
+  ): Promise<string | undefined> {
     try {
       const ts = Date.now();
       const screenshotPath = `/tmp/${label}-${ts}.png`;
@@ -91,8 +105,84 @@ export class DobScraperService {
       console.log(`Saved screenshot: ${screenshotPath}`);
       const html = await page.content();
       console.log(`Page content preview (${label}):`, html.slice(0, 2000));
+      return screenshotPath;
     } catch (err) {
       console.warn(`Debug capture failed for ${label}: ${err.message}`);
+      return undefined;
+    }
+  }
+
+  /**
+   * Name/phone (and applicant email) from BIS Application Details HTML — no PDF required.
+   */
+  private async extractBisApplicationDetails(
+    jobNumber: string,
+    docNumber: string,
+  ): Promise<{
+    name?: string;
+    phoneNumber?: string;
+    email?: string;
+  } | null> {
+    const page = await this.newPage();
+    try {
+      const url = `https://a810-bisweb.nyc.gov/bisweb/JobsQueryByNumberServlet?requestid=2&passjobnumber=${jobNumber}&passdocnumber=${docNumber}`;
+      await this.retryOperation(async () => {
+        await page.goto(url, {
+          waitUntil: 'domcontentloaded',
+          timeout: 60000,
+        });
+        await page.waitForLoadState('networkidle').catch(() => {});
+      });
+
+      const contact = await page.evaluate(() => {
+        const bodyText = document.body?.innerText || '';
+
+        const parseSection = (sectionText: string) => {
+          if (/not applicable/i.test(sectionText)) {
+            return null;
+          }
+          const name = sectionText.match(/\bName:\s*([^\n]+)/i)?.[1]?.trim();
+          const phone = sectionText
+            .match(/\bBusiness Phone:\s*([^\n]+)/i)?.[1]
+            ?.trim();
+          const email = sectionText.match(/\bE-Mail:\s*([^\n]+)/i)?.[1]?.trim();
+          if (!name && !phone && !email) {
+            return null;
+          }
+          return {
+            name: name || undefined,
+            phoneNumber: phone || undefined,
+            email: email || undefined,
+          };
+        };
+
+        const ownerMatch = bodyText.match(
+          /26\s+Owner'?s?\s+Information[\s\S]*?(?=\n\d+\s+[A-Z]|\nIf you have any questions|$)/i,
+        );
+        const owner = ownerMatch ? parseSection(ownerMatch[0]) : null;
+        if (owner) {
+          return owner;
+        }
+
+        const applicantMatch = bodyText.match(
+          /2\s+Applicant of Record Information[\s\S]*?(?=\n3\s+Filing Representative|$)/i,
+        );
+        return applicantMatch ? parseSection(applicantMatch[0]) : null;
+      });
+
+      if (contact) {
+        console.log(
+          `Application Details contact for job ${jobNumber} doc ${docNumber}: name=${contact.name || '(none)'}, phone=${contact.phoneNumber || '(none)'}`,
+        );
+      }
+      return contact;
+    } catch (error) {
+      console.warn(
+        `Application Details scrape failed for job ${jobNumber}: ${error.message}`,
+      );
+      return null;
+    } finally {
+      await page.close();
     }
   }
 
@@ -135,16 +225,14 @@ export class DobScraperService {
    * @param bin Building Identification Number
    * @returns Object containing phone number and email if found, null otherwise
    */
-  async getBisContactInfo(bin: string): Promise<{
-    phoneNumber?: string;
-    email?: string;
-    name?: string;
-  } | null> {
+  async getBisContactInfo(bin: string): Promise<ContactExtractionOutcome> {
     console.log(`Getting BIS contact info for BIN: ${bin}`);
     const page = await this.newPage();
+    const notes: DiagnosticNote[] = [];
+    let lastDeniedUrl: string | undefined;
+    let lastScreenshot: string | undefined;
 
     try {
-      // Use retry mechanism for the navigation
       await this.retryOperation(async () => {
         console.log(`Navigating to BIS for BIN: ${bin}`);
         const url = `https://a810-bisweb.nyc.gov/bisweb/JobsQueryByLocationServlet?requestid=1&allbin=${bin}`;
@@ -157,20 +245,65 @@ export class DobScraperService {
       const jobInfo = await this.extractJobInfo(page);
       console.log(`Found ${jobInfo.length} jobs for BIN ${bin}`);
 
-      // Process each job until contact information is found
+      if (jobInfo.length === 0) {
+        notes.push({
+          stage: 'BIS',
+          code: 'BIS_NO_JOBS',
+          detail: 'no rows in BIS job table',
+        });
+        lastScreenshot = await this.debugPageReturnPath(page, 'bis-no-jobs');
+        return {
+          contact: {},
+          notes,
+          screenshotPath: lastScreenshot,
+          deniedUrl: lastDeniedUrl,
+        };
+      }
+
       for (const { jobNumber, docNumber } of jobInfo) {
-        const result = await this.processVirtualJobFolder(
+        const folderResult = await this.processVirtualJobFolder(
           bin,
           jobNumber,
           docNumber,
         );
-        if (result) {
-          return result;
+        notes.push(...folderResult.notes);
+        if (folderResult.deniedUrl) {
+          lastDeniedUrl = folderResult.deniedUrl;
+        }
+        if (folderResult.screenshotPath) {
+          lastScreenshot = folderResult.screenshotPath;
+        }
+        if (hasAnyContact(folderResult.contact)) {
+          return {
+            contact: folderResult.contact,
+            notes: [],
+            screenshotPath: undefined,
+            deniedUrl: folderResult.deniedUrl,
+          };
         }
       }
 
       console.log(`No contact information found in any job for BIN ${bin}`);
-      return null;
+      return {
+        contact: {},
+        notes,
+        screenshotPath: lastScreenshot,
+        deniedUrl: lastDeniedUrl,
+      };
+    } catch (error) {
+      notes.push({
+        stage: 'BIS',
+        code: 'BIS_NAV_FAILED',
+        detail: error.message?.slice(0, 200) || 'BIS navigation failed',
+      });
+      lastScreenshot =
+        (await this.debugPageReturnPath(page, 'bis-error')) || lastScreenshot;
+      return {
+        contact: {},
+        notes,
+        screenshotPath: lastScreenshot,
+        deniedUrl: lastDeniedUrl,
+      };
     } finally {
       await page.close();
     }
@@ -216,17 +349,24 @@ export class DobScraperService {
     jobNumber: string,
     docNumber: string,
   ): Promise<{
-    phoneNumber?: string;
-    email?: string;
-    name?: string;
-  } | null> {
+    contact: ContactExtractionOutcome['contact'];
+    notes: DiagnosticNote[];
+    screenshotPath?: string;
+    deniedUrl?: string;
+  }> {
+    const notes: DiagnosticNote[] = [];
     console.log(
       `Processing Virtual Job Folder for Job: ${jobNumber}, Doc: ${docNumber}`,
     );
+
+    const appDetails = await this.extractBisApplicationDetails(
+      jobNumber,
+      docNumber,
+    );
+
     const folderPage = await this.newPage();
 
     try {
-      // Use retry mechanism for the navigation
       await this.retryOperation(async () => {
         const url = `https://a810-bisweb.nyc.gov/bisweb/BScanVirtualJobFolderServlet?passjobnumber=${jobNumber}&passdocnumber=${docNumber}&allbin=${bin}`;
         await folderPage.goto(url, {
@@ -238,7 +378,6 @@ export class DobScraperService {
         await folderPage.waitForLoadState('networkidle');
       });
 
-      // Find the scan code for the PLAN / WORK APPROVAL APPLICATION
       const scanCode = await folderPage.evaluate(() => {
         const rows = document.querySelectorAll('tr');
         for (const row of rows) {
@@ -247,7 +386,6 @@ export class DobScraperService {
             formNameCell?.textContent?.trim() ===
             'PLAN / WORK APPROVAL APPLICATION'
           ) {
-            // Get the scan code from the last cell in the row
             const scanCodeCell = row.querySelector('td:last-child');
             return scanCodeCell?.textContent?.trim() || null;
           }
@@ -257,41 +395,116 @@ export class DobScraperService {
 
       if (!scanCode) {
         console.log('No PLAN / WORK APPROVAL APPLICATION form found');
-        return null;
+        notes.push({
+          stage: 'BIS',
+          code: 'BIS_NO_PW1_FORM',
+          detail: `job ${jobNumber} doc ${docNumber}`,
+        });
+        if (appDetails && hasAnyContact(appDetails)) {
+          return {
+            contact: {
+              name: appDetails.name,
+              phoneNumber: appDetails.phoneNumber,
+              email: undefined,
+            },
+            notes,
+            screenshotPath: await this.debugPageReturnPath(
+              folderPage,
+              'bis-no-pw1',
+            ),
+          };
+        }
+        return {
+          contact: {},
+          notes,
+          screenshotPath: await this.debugPageReturnPath(
+            folderPage,
+            'bis-no-pw1',
+          ),
+        };
       }
 
       console.log(`Found scan code: ${scanCode}`);
 
-      // Open a new page for the document
       const documentPage = await this.newPage();
-      try {
-        // Use retry mechanism for the document navigation
-        await this.retryOperation(async () => {
-          // Navigate to the document page using the scan code
-          const documentUrl = `https://a810-bisweb.nyc.gov/bisweb/BScanJobDocumentServlet?passjobnumber=${jobNumber}&passdocnumber=${docNumber}&allbin=${bin}&scancode=${scanCode}`;
+      const documentUrl = `https://a810-bisweb.nyc.gov/bisweb/BScanJobDocumentServlet?passjobnumber=${jobNumber}&passdocnumber=${docNumber}&allbin=${bin}&scancode=${scanCode}`;
 
+      try {
+        await this.retryOperation(async () => {
           await documentPage.goto(documentUrl, {
             waitUntil: 'domcontentloaded',
             timeout: 60000,
           });
         });
 
-        // Get PDF content from iframe
-        const pdfPath = await this.getPdfFromIframe(documentPage);
-        if (!pdfPath) {
+        const pdfOutcome = await this.getPdfFromIframe(
+          documentPage,
+          documentUrl,
+        );
+        if (!pdfOutcome.path) {
           console.log('No PDF content found');
-          return null;
+          notes.push({
+            stage: 'BIS_PDF',
+            code: 'BIS_PDF_DOWNLOAD_FAILED',
+            detail: pdfOutcome.detail || `url=${pdfOutcome.deniedUrl || documentUrl}`,
+          });
+          if (
+            pdfOutcome.status === 403 ||
+            pdfOutcome.detail?.includes('403') ||
+            pdfOutcome.detail?.toLowerCase().includes('access denied')
+          ) {
+            notes.push({
+              stage: 'ACCESS',
+              code: 'ACCESS_POSSIBLE_BLOCK',
+              detail: `HTTP ${pdfOutcome.status || 403} on PDF`,
+            });
+          }
+          const contact = {
+            name: appDetails?.name,
+            phoneNumber: appDetails?.phoneNumber,
+            email: undefined,
+          };
+          return {
+            contact,
+            notes,
+            screenshotPath: await this.debugPageReturnPath(
+              documentPage,
+              'bis-no-pdf',
+            ),
+            deniedUrl: pdfOutcome.deniedUrl || documentUrl,
+          };
         }
 
-        const contactInfo =
-          await this.geminiService.extractContactInfoFromPdf(pdfPath);
-        if (!contactInfo) {
+        const pdfContact =
+          await this.geminiService.extractContactInfoFromPdf(pdfOutcome.path);
+        if (!pdfContact) {
           console.log('Could not extract contact information from PDF');
-          return null;
+          notes.push({
+            stage: 'GEMINI',
+            code: 'GEMINI_PARSE_OR_EMPTY',
+            detail: 'no owner fields from PW1 PDF',
+          });
+          return {
+            contact: {
+              name: appDetails?.name,
+              phoneNumber: appDetails?.phoneNumber,
+              email: appDetails?.email,
+            },
+            notes,
+            deniedUrl: undefined,
+          };
         }
 
         console.log('Successfully extracted contact information from PDF');
-        return contactInfo;
+        return {
+          contact: {
+            email: pdfContact.email || appDetails?.email,
+            phoneNumber: pdfContact.phoneNumber || appDetails?.phoneNumber,
+            name: pdfContact.name || appDetails?.name,
+          },
+          notes: [],
+          deniedUrl: undefined,
+        };
       } finally {
         await documentPage.close();
       }
@@ -299,62 +512,161 @@ export class DobScraperService {
       console.error(
         `Error processing Virtual Job Folder for Job ${jobNumber}: ${error.message}`,
       );
-      return null;
+      notes.push({
+        stage: 'BIS',
+        code: 'BIS_FOLDER_ERROR',
+        detail: error.message?.slice(0, 200),
+      });
+      if (appDetails && hasAnyContact(appDetails)) {
+        return {
+          contact: {
+            name: appDetails.name,
+            phoneNumber: appDetails.phoneNumber,
+            email: undefined,
+          },
+          notes,
+          screenshotPath: await this.debugPageReturnPath(
+            folderPage,
+            'bis-folder-error',
+          ),
+        };
+      }
+      return {
+        contact: {},
+        notes,
+        screenshotPath: await this.debugPageReturnPath(
+          folderPage,
+          'bis-folder-error',
+        ),
+      };
     } finally {
       await folderPage.close();
     }
   }
 
-  // Updated getPdfFromIframe function to use API request for raw PDF download
-  private async getPdfFromIframe(page: Page): Promise<string | null> {
-    return await this.retryOperation(async () => {
-      try {
-        // Wait for iframe to be present
-        const iframe = await page.waitForSelector('iframe', { timeout: 60000 });
-        if (!iframe) {
-          console.log('No iframe found');
-          return null;
-        }
+  private isBisPdfResponse(response: Response): boolean {
+    const url = response.url();
+    const contentType = response.headers()['content-type'] || '';
+    return (
+      url.includes('bisweb') &&
+      (contentType.includes('application/pdf') ||
+        url.includes('JobDocumentContent') ||
+        url.includes('JobDocument'))
+    );
+  }
 
-        // Get the iframe's src attribute
-        const iframeSrc = await iframe.getAttribute('src');
-        if (!iframeSrc) {
-          console.log('Iframe has no src attribute');
-          return null;
-        }
+  private async sessionHeaders(
+    page: Page,
+  ): Promise<Record<string, string>> {
+    const cookies = await page.context().cookies();
+    const cookieHeader = cookies.map((c) => `${c.name}=${c.value}`).join('; ');
+    const userAgent = await page.evaluate(() => navigator.userAgent);
+    return {
+      Referer: page.url(),
+      Cookie: cookieHeader,
+      'User-Agent': userAgent,
+      Accept: 'application/pdf,*/*',
+    };
+  }
 
-        // Construct the full PDF URL
-        const pdfUrl = `https://a810-bisweb.nyc.gov/bisweb/${iframeSrc}`;
-        console.log(`Downloading PDF from ${pdfUrl}`);
+  private savePdfBuffer(buffer: Buffer): string {
+    const pdfPath = `temp_${Date.now()}.pdf`;
+    fs.writeFileSync(pdfPath, buffer);
+    console.log(`PDF downloaded successfully to ${pdfPath}`);
+    return pdfPath;
+  }
 
-        // Use Playwright's API request to directly download the PDF
-        const response = await page.request.get(pdfUrl, { timeout: 60000 });
-        const contentType = response.headers()['content-type'];
+  /**
+   * BIS PDFs often 403 on bare API requests. Prefer the browser's own iframe load,
+   * then fall back to a cookie/referer-aware fetch.
+   */
+  private async getPdfFromIframe(
+    page: Page,
+    fallbackDeniedUrl?: string,
+  ): Promise<{
+    path: string | null;
+    deniedUrl?: string;
+    status?: number;
+    detail?: string;
+  }> {
+    try {
+      const pdfResponsePromise = page
+        .waitForResponse((res) => this.isBisPdfResponse(res), {
+          timeout: 60000,
+        })
+        .catch(() => null);
 
-        if (!response.ok() || !contentType?.includes('application/pdf')) {
-          console.error(
-            `Failed to download PDF. Status: ${response.status()}, Content-Type: ${contentType}`,
-          );
-          return null;
-        }
-
-        // Get the PDF buffer
-        const buffer = await response.body();
-
-        // Generate a unique filename using the current timestamp
-        const timestamp = new Date().getTime();
-        const pdfPath = `temp_${timestamp}.pdf`;
-
-        // Save the PDF file to disk
-        fs.writeFileSync(pdfPath, buffer);
-        console.log(`PDF downloaded successfully to ${pdfPath}`);
-
-        return pdfPath;
-      } catch (error) {
-        console.error(`Error downloading PDF: ${error.message}`);
-        return null;
+      const iframe = await page.waitForSelector('iframe', { timeout: 60000 });
+      if (!iframe) {
+        console.log('No iframe found');
+        return {
+          path: null,
+          deniedUrl: fallbackDeniedUrl,
+          detail: 'No iframe element',
+        };
       }
-    });
+
+      const frame = await iframe.contentFrame();
+      if (frame) {
+        await frame.waitForLoadState('load', { timeout: 60000 }).catch(() => {});
+        await frame
+          .waitForLoadState('networkidle', { timeout: 60000 })
+          .catch(() => {});
+      }
+
+      const iframeSrc = await iframe.getAttribute('src');
+      if (!iframeSrc) {
+        console.log('Iframe has no src attribute');
+        return {
+          path: null,
+          deniedUrl: fallbackDeniedUrl,
+          detail: 'Iframe has no src',
+        };
+      }
+
+      const pdfUrl = iframeSrc.startsWith('http')
+        ? iframeSrc
+        : `https://a810-bisweb.nyc.gov/bisweb/${iframeSrc.replace(/^\//, '')}`;
+      console.log(`Downloading PDF from ${pdfUrl}`);
+
+      let response = await pdfResponsePromise;
+      if (response?.ok()) {
+        const contentType = response.headers()['content-type'] || '';
+        if (contentType.includes('application/pdf')) {
+          return { path: this.savePdfBuffer(await response.body()) };
+        }
+      }
+
+      response = await page.request.get(pdfUrl, {
+        timeout: 60000,
+        headers: await this.sessionHeaders(page),
+      });
+      const contentType = response.headers()['content-type'] || '';
+      const status = response.status();
+      if (!response.ok() || !contentType.includes('application/pdf')) {
+        const preview = (await response.text().catch(() => '')).slice(0, 200);
+        console.error(
+          `Failed to download PDF. Status: ${status}, Content-Type: ${contentType}, Preview: ${preview}`,
+        );
+        await this.debugPage(page, 'bis-pdf-403');
+        return {
+          path: null,
+          deniedUrl: pdfUrl,
+          status,
+          detail: `status=${status}, content-type=${contentType}, preview=${preview.slice(0, 80)}`,
+        };
+      }
+
+      return { path: this.savePdfBuffer(await response.body()) };
+    } catch (error) {
+      console.error(`Error downloading PDF: ${error.message}`);
+      await this.debugPage(page, 'bis-pdf-error');
+      return {
+        path: null,
+        deniedUrl: fallbackDeniedUrl,
+        detail: error.message,
+      };
+    }
   }
 
   /**
@@ -362,11 +674,7 @@ export class DobScraperService {
    * @param bin Building Identification Number
    * @returns Path to the downloaded PDF if found, null otherwise
    */
-  async scrapeDobNow(bin: string): Promise<{
-    phoneNumber?: string;
-    email?: string;
-    name?: string;
-  } | null> {
+  async scrapeDobNow(bin: string): Promise<ContactExtractionOutcome> {
     console.log(`Scraping DOB NOW for BIN: ${bin}`);
     const page = await this.newPage();
 
@@ -388,7 +696,17 @@ export class DobScraperService {
       return result;
     } catch (error) {
       console.error(`Error scraping DOB NOW: ${error.message}`);
-      return null;
+      return {
+        contact: {},
+        notes: [
+          {
+            stage: 'DOBNOW',
+            code: 'DOBNOW_ERROR',
+            detail: error.message?.slice(0, 200),
+          },
+        ],
+        screenshotPath: await this.debugPageReturnPath(page, 'dobnow-error'),
+      };
     } finally {
       await page.close();
     }
@@ -441,21 +759,64 @@ export class DobScraperService {
   private async navigateToBuildJobFilings(page: Page): Promise<void> {
     await this.retryOperation(async () => {
       await page.getByRole('button', { name: 'BUILD: Job Filings' }).click();
-      await page.waitForTimeout(10000);
+      await page.waitForSelector('.ui-grid-canvas .ui-grid-row', {
+        timeout: 90000,
+      });
+      await page.waitForLoadState('networkidle', { timeout: 60000 }).catch(
+        () => {},
+      );
     });
   }
 
   /**
-   * Sorts the job list by modified date
+   * Sorts the job list by modified date (ui-grid header — not always a role=button).
    */
   private async sortByModifiedDate(page: Page): Promise<void> {
     await this.retryOperation(async () => {
-      await page.getByRole('button', { name: 'Modified Date' }).click();
+      await page.waitForSelector('.ui-grid-header', { timeout: 90000 });
+
+      const modifiedHeader = page
+        .locator('.ui-grid-header-cell')
+        .filter({ hasText: /Modified\s*Date/i })
+        .first();
+
+      const headerCount = await modifiedHeader.count();
+      if (headerCount > 0) {
+        await modifiedHeader.click({ timeout: 60000 });
+      } else {
+        console.log(
+          'ui-grid header not found, trying role=button for Modified Date',
+        );
+        await page.getByRole('button', { name: 'Modified Date' }).click({
+          timeout: 60000,
+        });
+      }
+
       await page.waitForTimeout(2500);
-      await page
-        .getByRole('button', { name: 'Modified Date Sort Ascending' })
-        .click();
+
+      const sortAscending = page.getByRole('button', {
+        name: /Modified Date Sort Ascending/i,
+      });
+      if ((await sortAscending.count()) > 0) {
+        await sortAscending.first().click({ timeout: 30000 });
+      } else {
+        const menuSort = page
+          .locator('.ui-grid-menu-item, [role="menuitem"]')
+          .filter({ hasText: /ascending/i });
+        if ((await menuSort.count()) > 0) {
+          await menuSort.first().click({ timeout: 30000 });
+        } else if (headerCount > 0) {
+          await modifiedHeader.dblclick({ timeout: 30000 }).catch(() => {});
+        }
+      }
+
       await page.waitForTimeout(2500);
+      await page.waitForSelector('.ui-grid-canvas .ui-grid-row', {
+        timeout: 60000,
+      });
+    }).catch(async (err) => {
+      await this.debugPage(page, 'dobnow-sort-modified-date');
+      throw err;
     });
   }
 
@@ -463,11 +824,7 @@ export class DobScraperService {
    * Processes each job row and looks for asbestos documents
    * Returns the path to the downloaded PDF if found
    */
-  private async processJobRows(page: Page): Promise<{
-    phoneNumber?: string;
-    email?: string;
-    name?: string;
-  } | null> {
+  private async processJobRows(page: Page): Promise<ContactExtractionOutcome> {
     const rows = await page.$$('.ui-grid-canvas > .ui-grid-row');
     let dialogCount = 1;
 
@@ -480,14 +837,37 @@ export class DobScraperService {
 
       const pdfPath = await this.processJobRow(page, row, dialogCount);
       if (pdfPath) {
-        return this.geminiService.extractAsbestosInfoFromPdf(pdfPath);
+        const contact =
+          await this.geminiService.extractAsbestosInfoFromPdf(pdfPath);
+        if (contact && hasAnyContact(contact)) {
+          return { contact, notes: [] };
+        }
+        return {
+          contact: contact || {},
+          notes: [
+            {
+              stage: 'GEMINI',
+              code: 'GEMINI_PARSE_OR_EMPTY',
+              detail: 'DOB NOW asbestos PDF',
+            },
+          ],
+        };
       }
 
       dialogCount++;
     }
 
     console.log('No asbestos documents found in any job');
-    return null;
+    return {
+      contact: {},
+      notes: [
+        {
+          stage: 'DOBNOW',
+          code: 'DOBNOW_NO_ASBESTOS_PDF',
+        },
+      ],
+      screenshotPath: await this.debugPageReturnPath(page, 'dobnow-no-asbestos'),
+    };
   }
 
   /**
