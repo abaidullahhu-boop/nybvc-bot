@@ -5,21 +5,39 @@ on:
     branches:
       - main
 
+env:
+  GCP_PROJECT_ID: ny-building-bot-496807
+  GCP_REGION: us-east1
+  IMAGE_REPO: us-east1-docker.pkg.dev/ny-building-bot-496807/nyc-building-bot/app
+
 jobs:
   deploy:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
       - name: Checkout code
-        uses: actions/checkout@v2
+        uses: actions/checkout@v4
 
-      - name: Authenticate with Google Cloud
-        uses: google-github-actions/auth@v0
+      - name: Check GCP deploy secret is configured
+        run: |
+          if [ -z "${{ secrets.GCP_CREDENTIALS }}" ]; then
+            echo "::error::GitHub secret GCP_CREDENTIALS is missing or empty."
+            echo "Add it in: Repo → Settings → Secrets and variables → Actions"
+            echo "Value: full JSON key for a GCP service account with Cloud Run, Artifact Registry, and Scheduler permissions."
+            exit 1
+          fi
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
         with:
           credentials_json: ${{ secrets.GCP_CREDENTIALS }}
 
-      - name: Set up Google Cloud SDK
-        run: |
-          gcloud --quiet auth configure-docker us-east1-docker.pkg.dev
+      - name: Set up Cloud SDK
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Configure Docker for Artifact Registry
+        run: gcloud auth configure-docker us-east1-docker.pkg.dev --quiet
 
       - name: Enable required APIs
         run: |
@@ -33,10 +51,12 @@ jobs:
 
       - name: Create service account if not exists
         run: |
-          if ! gcloud iam service-accounts describe cloud-run-scheduler@ny-building-bot.iam.gserviceaccount.com; then
+          if ! gcloud iam service-accounts describe cloud-run-scheduler@ny-building-bot-496807.iam.gserviceaccount.com; then
             gcloud iam service-accounts create cloud-run-scheduler --display-name="Cloud Run Scheduler"
           fi
-          gcloud projects add-iam-policy-binding ny-building-bot --member="serviceAccount:cloud-run-scheduler@ny-building-bot.iam.gserviceaccount.com" --role="roles/run.invoker"
+          gcloud projects add-iam-policy-binding ny-building-bot-496807 \
+            --member="serviceAccount:cloud-run-scheduler@ny-building-bot-496807.iam.gserviceaccount.com" \
+            --role="roles/run.invoker"
 
       - name: Create credentials files
         run: |
@@ -45,41 +65,37 @@ jobs:
 
       - name: Create .env.yaml
         run: |
-          cat <<EOF > .env.yaml
-          RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
-          FROM_EMAIL: ${{ secrets.FROM_EMAIL }}
-          GOOGLE_AI_API_KEY: ${{ secrets.GOOGLE_AI_API_KEY }}
+          cat > .env.yaml <<EOF
+          RESEND_API_KEY: '${{ secrets.RESEND_API_KEY }}'
+          FROM_EMAIL: '${{ secrets.FROM_EMAIL }}'
+          GOOGLE_AI_API_KEY: '${{ secrets.GOOGLE_AI_API_KEY }}'
           GOOGLE_SHEET_CREDENTIALS_PATH: /app/google-sheet-credentials.json
           GOOGLE_DATASTORE_CREDENTIALS_PATH: /app/google-datastore-credentials.json
-          PROJECT1_GOOGLE_SHEET_ID: ${{ secrets.PROJECT1_GOOGLE_SHEET_ID }}
-          PROJECT2_GOOGLE_SHEET_ID: ${{ secrets.PROJECT2_GOOGLE_SHEET_ID }}
-          PROJECT2_GOOGLE_SHEET_NAME: ${{ secrets.PROJECT2_GOOGLE_SHEET_NAME }}
-          GCP_PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
-          GCP_LOCATION: ${{ secrets.GCP_LOCATION }}
-          CLOUD_TASKS_QUEUE_NAME: ${{ secrets.CLOUD_TASKS_QUEUE_NAME }}
-          CLOUD_TASKS_SERVICE_ACCOUNT: ${{ secrets.CLOUD_TASKS_SERVICE_ACCOUNT }}
-          SERVICE_URL: ${{ secrets.SERVICE_URL }}
+          PROJECT1_GOOGLE_SHEET_ID: '${{ secrets.PROJECT1_GOOGLE_SHEET_ID }}'
+          PROJECT2_GOOGLE_SHEET_ID: '${{ secrets.PROJECT2_GOOGLE_SHEET_ID }}'
+          PROJECT2_GOOGLE_SHEET_NAME: '${{ secrets.PROJECT2_GOOGLE_SHEET_NAME }}'
+          GCP_PROJECT_ID: '${{ secrets.GCP_PROJECT_ID }}'
+          GCP_LOCATION: '${{ secrets.GCP_LOCATION }}'
+          CLOUD_TASKS_QUEUE_NAME: '${{ secrets.CLOUD_TASKS_QUEUE_NAME }}'
+          CLOUD_TASKS_SERVICE_ACCOUNT: '${{ secrets.CLOUD_TASKS_SERVICE_ACCOUNT }}'
+          SERVICE_URL: '${{ secrets.SERVICE_URL }}'
           RUN_HTTP_SERVER: "true"
-          HTTP_PROXY: "${{ secrets.HTTP_PROXY }}"
-          HTTPS_PROXY: "${{ secrets.HTTPS_PROXY }}"
+          HTTP_PROXY: '${{ secrets.HTTP_PROXY }}'
+          HTTPS_PROXY: '${{ secrets.HTTPS_PROXY }}'
           EOF
 
-      - name: Build and push Docker image (no cache, fresh Chrome)
+      - name: Build and push Docker image
         run: |
-          IMAGE=us-east1-docker.pkg.dev/ny-building-bot/nyc-building-bot/app
-          TAG=latest
-          SHA_TAG=${GITHUB_SHA}
-          docker build --pull --no-cache -t "$IMAGE:$TAG" -t "$IMAGE:$SHA_TAG" .
-          docker push "$IMAGE:$TAG"
-          docker push "$IMAGE:$SHA_TAG"
+          docker build --pull --no-cache \
+            -t "${{ env.IMAGE_REPO }}:latest" \
+            -t "${{ env.IMAGE_REPO }}:${{ github.sha }}" .
+          docker push "${{ env.IMAGE_REPO }}:latest"
+          docker push "${{ env.IMAGE_REPO }}:${{ github.sha }}"
 
       - name: Deploy to Cloud Run
-        env:
-          IMAGE: us-east1-docker.pkg.dev/ny-building-bot/nyc-building-bot/app
-          SHA_TAG: ${{ github.sha }}
         run: |
           gcloud run deploy nyc-building-bot \
-            --image "$IMAGE:$SHA_TAG" \
+            --image "${{ env.IMAGE_REPO }}:${{ github.sha }}" \
             --region us-east1 --platform managed \
             --cpu 2 --memory 8Gi --timeout 3600 \
             --env-vars-file .env.yaml \
@@ -90,12 +106,24 @@ jobs:
         id: get_url
         run: |
           URL=$(gcloud run services describe nyc-building-bot --region us-east1 --format="value(status.url)")
-          echo "url=$URL" >> $GITHUB_OUTPUT
+          echo "url=$URL" >> "$GITHUB_OUTPUT"
 
       - name: Create or update Cloud Scheduler job
         run: |
           if gcloud scheduler jobs describe daily-tasks --location=us-east1; then
-            gcloud scheduler jobs update http daily-tasks --schedule="30 7 * * *" --uri="${{ steps.get_url.outputs.url }}/trigger" --http-method=POST --time-zone="America/New_York" --location=us-east1 --oidc-service-account-email="cloud-run-scheduler@ny-building-bot.iam.gserviceaccount.com"
+            gcloud scheduler jobs update http daily-tasks \
+              --schedule="30 7 * * *" \
+              --uri="${{ steps.get_url.outputs.url }}/trigger" \
+              --http-method=POST \
+              --time-zone="America/New_York" \
+              --location=us-east1 \
+              --oidc-service-account-email="cloud-run-scheduler@ny-building-bot-496807.iam.gserviceaccount.com"
           else
-            gcloud scheduler jobs create http daily-tasks --schedule="30 7 * * *" --uri="${{ steps.get_url.outputs.url }}/trigger" --http-method=POST --time-zone="America/New_York" --location=us-east1 --oidc-service-account-email="cloud-run-scheduler@ny-building-bot.iam.gserviceaccount.com"
+            gcloud scheduler jobs create http daily-tasks \
+              --schedule="30 7 * * *" \
+              --uri="${{ steps.get_url.outputs.url }}/trigger" \
+              --http-method=POST \
+              --time-zone="America/New_York" \
+              --location=us-east1 \
+              --oidc-service-account-email="cloud-run-scheduler@ny-building-bot-496807.iam.gserviceaccount.com"
           fi
