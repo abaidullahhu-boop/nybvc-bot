@@ -36,8 +36,6 @@ export interface ContactExtractionOutcome {
   screenshotPath?: string;
   /** BIS document/PDF URL that returned 403 or access denied */
   deniedUrl?: string;
-  /** Applicant Business Phone from BIS Application Details section 2 */
-  applicantPhoneNumber?: string;
   /** Last BIS folder or document URL attempted for this BIN */
   lastAttemptedUrl?: string;
 }
@@ -93,7 +91,6 @@ export function emptyOutcome(): ContactExtractionOutcome {
     notes: [],
     screenshotPath: undefined,
     deniedUrl: undefined,
-    applicantPhoneNumber: undefined,
     lastAttemptedUrl: undefined,
   };
 }

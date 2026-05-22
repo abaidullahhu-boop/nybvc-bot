@@ -456,9 +456,9 @@ Use `1018272` only when debugging **sort header** selectors; use **`1060120`** f
 
 ## Sheet column semantics
 
-Project 1 appends one row per BIN to the dated tab (`MM/DD/YYYY`). Header (7 columns):
+Project 1 appends one row per BIN to the dated tab (`MM/DD/YYYY`). Header (6 columns):
 
-`BIN | Email | Phone | Name | Applicant Phone | Denied URL | Reason`
+`BIN | Email | Phone | Name | Denied URL | Reason`
 
 | Column | Primary source | Fallback | When empty |
 |--------|----------------|----------|------------|
@@ -466,16 +466,15 @@ Project 1 appends one row per BIN to the dated tab (`MM/DD/YYYY`). Header (7 col
 | **Email** | BIS PDF (Gemini) | DOB NOW asbestos PDF | `Email not found` |
 | **Phone** | NYC Open Data `owner_sphone__` (scan up to 10 filings) | BIS owner section / PDF owner phone | `Phone not found` |
 | **Name** | Open Data owner name | Open Data applicant name → BIS owner/applicant → PDF | `Name not found` |
-| **Applicant Phone** | BIS Application Details §2 (`Business Phone:`) only | — | `Applicant phone not found` |
 | **Denied URL** | Last BIS folder or document URL attempted for this BIN | DOB NOW denied URL if BIS none | blank |
 | **Reason** | Diagnostic notes (`formatReasonFromNotes`) | — | blank |
 
 **Notes:**
 
-- [DOB Job Application Filings `ic3t-wcy2`](https://data.cityofnewyork.us/resource/ic3t-wcy2.json) has **no applicant phone field** — only `owner_sphone__` and applicant names. Applicant phone is BIS-only.
+- [DOB Job Application Filings `ic3t-wcy2`](https://data.cityofnewyork.us/resource/ic3t-wcy2.json) has **no applicant phone field** — only `owner_sphone__` and applicant names.
 - **Denied URL** is populated on any BIS folder/PDF attempt (`BScanVirtualJobFolderServlet` or `BScanJobDocumentServlet`), not only HTTP 403.
 - **Reason** hint for `ACCESS_POSSIBLE_BLOCK`: residential US egress / `HTTP_PROXY` on Cloud Run (not commercial VPN).
-- Older tabs with 6 columns are not auto-migrated; new dated tabs get the 7-column header.
+- Older tabs with 7 columns (included Applicant Phone) are not auto-migrated; new dated tabs use the 6-column header.
 
 ---
 

@@ -94,7 +94,6 @@ export class AppService {
             'Email',
             'Phone',
             'Name',
-            'Applicant Phone',
             'Denied URL',
             'Reason',
           ],
@@ -156,9 +155,6 @@ export class AppService {
           apiContact?.phoneNumber ||
           bisOutcome.contact.phoneNumber?.trim() ||
           '';
-        const applicantPhone =
-          bisOutcome.applicantPhoneNumber?.trim() || '';
-
         const reason =
           mergedNotes.length > 0 ? formatReasonFromNotes(mergedNotes) : '';
 
@@ -166,13 +162,12 @@ export class AppService {
         row.push(email || 'Email not found');
         row.push(phone || 'Phone not found');
         row.push(name || 'Name not found');
-        row.push(applicantPhone || 'Applicant phone not found');
         row.push(deniedUrl || '');
         row.push(reason);
 
         await this.googleSheetService.appendRow(sheetId, sheetName, [row]);
         console.log(
-          `Appended row for BIN ${bin}: email=${email || 'N/A'}, phone=${phone || 'N/A'}, applicantPhone=${applicantPhone || 'N/A'}, name=${name || 'N/A'}, deniedUrl=${deniedUrl || 'N/A'}`,
+          `Appended row for BIN ${bin}: email=${email || 'N/A'}, phone=${phone || 'N/A'}, name=${name || 'N/A'}, deniedUrl=${deniedUrl || 'N/A'}`,
         );
       }
     } catch (error) {

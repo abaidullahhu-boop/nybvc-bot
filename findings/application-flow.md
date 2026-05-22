@@ -132,7 +132,7 @@ All routes accept **POST only**. JSON body where noted.
 | 1 | Log `Starting Project 1 workflow…` |
 | 2 | Pick sheet tab name = **today’s date** in NYC (`MM/DD/YYYY`), or `sheetDate` if provided. |
 | 3 | Open Google Spreadsheet `PROJECT1_GOOGLE_SHEET_ID`. |
-| 4 | If tab does not exist → create tab + header row (7 columns — see [Sheet columns](#sheet-columns-project-1)). |
+| 4 | If tab does not exist → create tab + header row (6 columns — see [Sheet columns](#sheet-columns-project-1)). |
 | 5 | **Launch Chrome** once for the whole run (`initializeBrowser`). |
 | 6 | Loop **each BIN** in order (steps below). |
 | 7 | **Close browser** when all BINs done (`cleanup`). |
@@ -159,13 +159,11 @@ For **each BIN**, in order:
 | 4 | **Phone (owner):** first non-empty `owner_sphone__` across those rows. |
 | 5 | **No email** from this API (dataset has no owner email field). |
 | 6 | Also returns **address**, **borough**, **applicant title/license**, **job description** for web search queries. |
-| 7 | **No applicant phone** in API (applicant phone comes from BIS only). |
-
 Code: [`getOwnerContactFromJobApplications`](../src/nyc-open-data.service.ts)
 
 ### Step 5.3 — BIS scrape
 
-Goal: mainly **email**; also backup **name / owner phone / applicant phone** from HTML and PDFs.
+Goal: mainly **email**; also backup **name / owner phone** from HTML and PDFs.
 
 | Step | What happens |
 |------|----------------|
@@ -187,7 +185,7 @@ Goal: mainly **email**; also backup **name / owner phone / applicant phone** fro
 | 4g | If PDF blocked (403 Akamai) → note `BIS_PDF_DOWNLOAD_FAILED` + `ACCESS_POSSIBLE_BLOCK`, keep HTML contact if any. |
 | 4h | If PDF OK → **Gemini** extracts owner fields from PW1 PDF. |
 | 4i | If Gemini empty → note `GEMINI_PARSE_OR_EMPTY`. |
-| 4j | Merge contact from this job into **best contact** across all jobs; keep latest **applicant phone**. |
+| 4j | Merge contact from this job into **best contact** across all jobs. |
 
 Code: [`getBisContactInfo`](../src/dob-scrapper.service.ts), [`processVirtualJobFolder`](../src/dob-scrapper.service.ts)
 
@@ -229,7 +227,6 @@ Code: [`google-search.service.ts`](../src/google-search.service.ts), [`email-ext
 | **Email** | BIS → DOB NOW → SerpAPI web search (owner, then applicant) → else `Email not found` |
 | **Phone** | Open Data owner phone → BIS owner phone / PDF → else `Phone not found` |
 | **Name** | Open Data name → BIS name → else `Name not found` |
-| **Applicant Phone** | BIS applicant `Business Phone` only → else `Applicant phone not found` |
 | **Denied URL** | Last BIS folder or document URL tried (any outcome) |
 | **Reason** | Semicolon-separated diagnostic codes (if any) |
 

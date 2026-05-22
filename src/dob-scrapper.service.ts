@@ -33,7 +33,6 @@ type VirtualFolderResult = {
   screenshotPath?: string;
   deniedUrl?: string;
   lastAttemptedUrl?: string;
-  applicantPhoneNumber?: string;
 };
 
 /**
@@ -210,25 +209,18 @@ export class DobScraperService {
     }
   }
 
-  /** Owner fields for contact merge; applicant phone kept separate for sheet column. */
-  private contactsFromAppDetails(
+  private contactFromAppDetails(
     appDetails: BisApplicationDetails | null,
-  ): {
-    contact: ContactExtractionOutcome['contact'];
-    applicantPhoneNumber?: string;
-  } {
+  ): ContactExtractionOutcome['contact'] {
     if (!appDetails) {
-      return { contact: {} };
+      return {};
     }
     const owner = appDetails.owner;
     const applicant = appDetails.applicant;
     return {
-      contact: {
-        name: owner?.name || applicant?.name,
-        phoneNumber: owner?.phoneNumber,
-        email: owner?.email || applicant?.email,
-      },
-      applicantPhoneNumber: applicant?.phoneNumber?.trim() || undefined,
+      name: owner?.name || applicant?.name,
+      phoneNumber: owner?.phoneNumber,
+      email: owner?.email || applicant?.email,
     };
   }
 
@@ -279,7 +271,6 @@ export class DobScraperService {
     let lastAttemptedUrl: string | undefined;
     let lastScreenshot: string | undefined;
     let bestContact: ContactExtractionOutcome['contact'] = {};
-    let bestApplicantPhone: string | undefined;
 
     try {
       await this.retryOperation(async () => {
@@ -307,7 +298,6 @@ export class DobScraperService {
           screenshotPath: lastScreenshot,
           deniedUrl: lastDeniedUrl,
           lastAttemptedUrl,
-          applicantPhoneNumber: bestApplicantPhone,
         };
       }
 
@@ -328,9 +318,6 @@ export class DobScraperService {
           lastScreenshot = folderResult.screenshotPath;
         }
         bestContact = mergeContact(bestContact, folderResult.contact);
-        if (folderResult.applicantPhoneNumber?.trim()) {
-          bestApplicantPhone = folderResult.applicantPhoneNumber.trim();
-        }
 
         // Stop early when email, owner phone, and name are all present from BIS.
         if (hasFullContact(bestContact)) {
@@ -340,7 +327,6 @@ export class DobScraperService {
             screenshotPath: undefined,
             deniedUrl: lastDeniedUrl,
             lastAttemptedUrl,
-            applicantPhoneNumber: bestApplicantPhone,
           };
         }
       }
@@ -352,7 +338,6 @@ export class DobScraperService {
         screenshotPath: lastScreenshot,
         deniedUrl: lastDeniedUrl,
         lastAttemptedUrl,
-        applicantPhoneNumber: bestApplicantPhone,
       };
     } catch (error) {
       notes.push({
@@ -368,7 +353,6 @@ export class DobScraperService {
         screenshotPath: lastScreenshot,
         deniedUrl: lastDeniedUrl,
         lastAttemptedUrl,
-        applicantPhoneNumber: bestApplicantPhone,
       };
     } finally {
       await page.close();
@@ -424,7 +408,7 @@ export class DobScraperService {
       jobNumber,
       docNumber,
     );
-    const fromApp = this.contactsFromAppDetails(appDetails);
+    const htmlContact = this.contactFromAppDetails(appDetails);
 
     const folderUrl = `https://a810-bisweb.nyc.gov/bisweb/BScanVirtualJobFolderServlet?passjobnumber=${jobNumber}&passdocnumber=${docNumber}&allbin=${bin}`;
     let lastAttemptedUrl = folderUrl;
@@ -465,8 +449,7 @@ export class DobScraperService {
           detail: `job ${jobNumber} doc ${docNumber}`,
         });
         return {
-          contact: fromApp.contact,
-          applicantPhoneNumber: fromApp.applicantPhoneNumber,
+          contact: htmlContact,
           notes,
           lastAttemptedUrl,
           screenshotPath: await this.debugPageReturnPath(
@@ -514,11 +497,10 @@ export class DobScraperService {
           }
           return {
             contact: {
-              name: fromApp.contact.name,
-              phoneNumber: fromApp.contact.phoneNumber,
+              name: htmlContact.name,
+              phoneNumber: htmlContact.phoneNumber,
               email: undefined,
             },
-            applicantPhoneNumber: fromApp.applicantPhoneNumber,
             notes,
             lastAttemptedUrl,
             screenshotPath: await this.debugPageReturnPath(
@@ -540,11 +522,10 @@ export class DobScraperService {
           });
           return {
             contact: {
-              name: fromApp.contact.name,
-              phoneNumber: fromApp.contact.phoneNumber,
-              email: fromApp.contact.email,
+              name: htmlContact.name,
+              phoneNumber: htmlContact.phoneNumber,
+              email: htmlContact.email,
             },
-            applicantPhoneNumber: fromApp.applicantPhoneNumber,
             notes,
             lastAttemptedUrl,
           };
@@ -553,12 +534,11 @@ export class DobScraperService {
         console.log('Successfully extracted contact information from PDF');
         return {
           contact: {
-            email: pdfContact.email || fromApp.contact.email,
+            email: pdfContact.email || htmlContact.email,
             phoneNumber:
-              pdfContact.phoneNumber || fromApp.contact.phoneNumber,
-            name: pdfContact.name || fromApp.contact.name,
+              pdfContact.phoneNumber || htmlContact.phoneNumber,
+            name: pdfContact.name || htmlContact.name,
           },
-          applicantPhoneNumber: fromApp.applicantPhoneNumber,
           notes: [],
           lastAttemptedUrl,
         };
@@ -575,8 +555,7 @@ export class DobScraperService {
         detail: error.message?.slice(0, 200),
       });
       return {
-        contact: fromApp.contact,
-        applicantPhoneNumber: fromApp.applicantPhoneNumber,
+        contact: htmlContact,
         notes,
         lastAttemptedUrl,
         screenshotPath: await this.debugPageReturnPath(

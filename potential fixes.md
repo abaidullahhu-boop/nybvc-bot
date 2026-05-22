@@ -10,7 +10,7 @@
 
 ## Likely Root Causes for "Not Found" Rows
 
-- `API_APPLICANT_PHONE_NA`: Socrata `ic3t-wcy2` has no applicant phone column; use **Applicant Phone** sheet column from BIS §2 only.
+- Socrata `ic3t-wcy2` has no applicant phone field (owner phone only via `owner_sphone__`).
 - `BIS_TRAFFIC_ERROR_PAGE`: BIS served "site is experiencing high traffic volume" page.
 - `BIS_NO_JOBS_FOUND`: Job listing parsed but no valid job rows extracted.
 - `BIS_NO_PLAN_WORK_FORM`: No `PLAN / WORK APPROVAL APPLICATION` in Virtual Job Folder.
