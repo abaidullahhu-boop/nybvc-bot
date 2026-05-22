@@ -7,10 +7,10 @@ This service scrapes DOB NOW and can be blocked by Akamai. To reduce bans and ma
 - VPC: `bot-egress`
 - Subnet: `bot-egress-subnet` (10.8.0.0/28)
 - Cloud Router/NAT: `bot-nat-router` + `bot-nat`
-- NAT IP pool (round-robin):
-  - `bot-egress-ip` → 35.237.220.252
-  - `bot-egress-ip-2` → 34.75.2.118
-  - `bot-egress-ip-3` → 104.196.57.175
+- NAT IP pool (round-robin, project `ny-building-bot-496807`):
+  - `bot-egress-ip` → 34.138.66.227
+  - `bot-egress-ip-2` → 34.139.46.21
+  - `bot-egress-ip-3` → 34.24.224.124
 - Serverless VPC connector: `bot-serverless-conn` (10.8.1.0/28) — attached to Cloud Run with `vpc-egress=all-traffic`.
 
 ## How Cloud Run is deployed

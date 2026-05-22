@@ -90,7 +90,15 @@ export class AppService {
         await this.googleSheetService.createSheet(sheetId, sheetName);
         // Add header row
         await this.googleSheetService.appendRow(sheetId, sheetName, [
-          ['BIN', 'Email', 'Phone', 'Name', 'Denied URL', 'Reason'],
+          [
+            'BIN',
+            'Email',
+            'Phone',
+            'Name',
+            'Applicant Phone',
+            'Denied URL',
+            'Reason',
+          ],
         ]);
         console.log(`Created new sheet for ${sheetName} with headers`);
       } else {
@@ -111,7 +119,10 @@ export class AppService {
         // Step 2: attempt BIS scraping — only care about email from here
         const bisOutcome = await this.dobScraperService.getBisContactInfo(bin);
         const mergedNotes = [...bisOutcome.notes];
-        let deniedUrl = bisOutcome.deniedUrl || '';
+        let deniedUrl =
+          bisOutcome.lastAttemptedUrl ||
+          bisOutcome.deniedUrl ||
+          '';
 
         let email = bisOutcome.contact.email?.trim() || '';
 
@@ -122,6 +133,9 @@ export class AppService {
           mergedNotes.push(...dobNowOutcome.notes);
           if (!deniedUrl && dobNowOutcome.deniedUrl) {
             deniedUrl = dobNowOutcome.deniedUrl;
+          }
+          if (!deniedUrl && dobNowOutcome.lastAttemptedUrl) {
+            deniedUrl = dobNowOutcome.lastAttemptedUrl;
           }
           email = dobNowOutcome.contact.email?.trim() || '';
         }
@@ -136,6 +150,8 @@ export class AppService {
           apiContact?.phoneNumber ||
           bisOutcome.contact.phoneNumber?.trim() ||
           '';
+        const applicantPhone =
+          bisOutcome.applicantPhoneNumber?.trim() || '';
 
         const reason =
           mergedNotes.length > 0 ? formatReasonFromNotes(mergedNotes) : '';
@@ -144,12 +160,13 @@ export class AppService {
         row.push(email || 'Email not found');
         row.push(phone || 'Phone not found');
         row.push(name || 'Name not found');
+        row.push(applicantPhone || 'Applicant phone not found');
         row.push(deniedUrl || '');
         row.push(reason);
 
         await this.googleSheetService.appendRow(sheetId, sheetName, [row]);
         console.log(
-          `Appended row for BIN ${bin}: email=${email || 'N/A'}, phone=${phone || 'N/A'}, name=${name || 'N/A'}, deniedUrl=${deniedUrl || 'N/A'}`,
+          `Appended row for BIN ${bin}: email=${email || 'N/A'}, phone=${phone || 'N/A'}, applicantPhone=${applicantPhone || 'N/A'}, name=${name || 'N/A'}, deniedUrl=${deniedUrl || 'N/A'}`,
         );
       }
     } catch (error) {

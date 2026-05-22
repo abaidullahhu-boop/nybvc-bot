@@ -19,7 +19,7 @@ gcloud auth login
 1. Set your project:
 
 ```bash
-gcloud config set project ny-building-bot
+gcloud config set project ny-building-bot-496807
 ```
 
 1. Configure Docker to use the Google Artifact Registry:
@@ -71,19 +71,19 @@ PROJECT2_GOOGLE_SHEET_NAME: 'your-google-sheet-name'
 1. Build and tag the Docker image:
 
 ```bash
-docker build -t us-east1-docker.pkg.dev/ny-building-bot/nyc-building-bot/app:latest .
+docker build -t us-east1-docker.pkg.dev/ny-building-bot-496807/nyc-building-bot/app:latest .
 ```
 
 1. Push the image to Google Artifact Registry:
 
 ```bash
-docker push us-east1-docker.pkg.dev/ny-building-bot/nyc-building-bot/app:latest
+docker push us-east1-docker.pkg.dev/ny-building-bot-496807/nyc-building-bot/app:latest
 ```
 
 1. Deploy to Cloud Run:
 
 ```bash
-gcloud run deploy nyc-building-bot --image us-east1-docker.pkg.dev/ny-building-bot/nyc-building-bot/app:latest --region us-east1 --platform managed --memory 4Gi --timeout 3600 --env-vars-file .env.yaml --no-allow-unauthenticated --min-instances 0 --max-instances 1 --cpu-throttling
+gcloud run deploy nyc-building-bot --image us-east1-docker.pkg.dev/ny-building-bot-496807/nyc-building-bot/app:latest --region us-east1 --platform managed --memory 4Gi --timeout 3600 --env-vars-file .env.yaml --no-allow-unauthenticated --min-instances 0 --max-instances 1 --cpu-throttling
 ```
 
 1. Get the Cloud Run service URL:
@@ -97,13 +97,13 @@ gcloud run services describe nyc-building-bot --region us-east1 --format="value(
 ```bash
 gcloud iam service-accounts create cloud-run-scheduler --display-name="Cloud Run Scheduler"
 
-gcloud projects add-iam-policy-binding ny-building-bot --member="serviceAccount:cloud-run-scheduler@ny-building-bot.iam.gserviceaccount.com" --role="roles/run.invoker"
+gcloud projects add-iam-policy-binding ny-building-bot-496807 --member="serviceAccount:cloud-run-scheduler@ny-building-bot-496807.iam.gserviceaccount.com" --role="roles/run.invoker"
 ```
 
 1. Create a Cloud Scheduler job to trigger the service daily at 10 AM NYC time:
 
 ```bash
-gcloud scheduler jobs create http daily-tasks --schedule="30 7 * * *" --uri="URL_OF_CLOUD_RUN_SERVICE" --http-method=POST --time-zone="America/New_York" --location=us-east1 --oidc-service-account-email="cloud-run-scheduler@ny-building-bot.iam.gserviceaccount.com"
+gcloud scheduler jobs create http daily-tasks --schedule="30 7 * * *" --uri="URL_OF_CLOUD_RUN_SERVICE" --http-method=POST --time-zone="America/New_York" --location=us-east1 --oidc-service-account-email="cloud-run-scheduler@ny-building-bot-496807.iam.gserviceaccount.com"
 ```
 
 ## Deployment Options Explained
@@ -161,20 +161,20 @@ To update the deployed service with new code:
 2. Build and tag a new Docker image:
 
 ```bash
-docker build -t us-east1-docker.pkg.dev/ny-building-bot/nyc-building-bot/app:latest .
+docker build -t us-east1-docker.pkg.dev/ny-building-bot-496807/nyc-building-bot/app:latest .
 ```
 
 1. Push the new image:
 
 ```bash
-docker push us-east1-docker.pkg.dev/ny-building-bot/nyc-building-bot/app:latest
+docker push us-east1-docker.pkg.dev/ny-building-bot-496807/nyc-building-bot/app:latest
 ```
 
 1. Deploy the new version:
 
 ```bash
 gcloud run deploy nyc-building-bot \
-  --image us-east1-docker.pkg.dev/ny-building-bot/nyc-building-bot/app:latest \
+  --image us-east1-docker.pkg.dev/ny-building-bot-496807/nyc-building-bot/app:latest \
   --region us-east1
 ```
 

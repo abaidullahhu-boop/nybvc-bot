@@ -29,8 +29,12 @@ export interface ContactExtractionOutcome {
   };
   notes: DiagnosticNote[];
   screenshotPath?: string;
-  /** Last BIS document/PDF URL that returned 403 or access denied */
+  /** BIS document/PDF URL that returned 403 or access denied */
   deniedUrl?: string;
+  /** Applicant Business Phone from BIS Application Details section 2 */
+  applicantPhoneNumber?: string;
+  /** Last BIS folder or document URL attempted for this BIN */
+  lastAttemptedUrl?: string;
 }
 
 export type GeminiPdfExtractionResult =
@@ -67,8 +71,9 @@ export function formatReasonFromNotes(notes: DiagnosticNote[]): string {
       (n.detail && /timeout/i.test(n.detail)),
   );
   if (has403 || hasTimeout) {
-    const hint =
-      'hint: possible network/geo block or slow site — try VPN or retry';
+    const hint = has403
+      ? 'hint: possible Akamai block — use residential US egress or HTTP_PROXY on Cloud Run'
+      : 'hint: possible slow site or timeout — retry or check egress';
     const combined = `${s}; ${hint}`;
     return combined.length > REASON_MAX_LEN
       ? `${combined.slice(0, REASON_MAX_LEN - 3)}...`
@@ -83,7 +88,19 @@ export function emptyOutcome(): ContactExtractionOutcome {
     notes: [],
     screenshotPath: undefined,
     deniedUrl: undefined,
+    applicantPhoneNumber: undefined,
+    lastAttemptedUrl: undefined,
   };
+}
+
+export function hasFullContact(
+  c: ContactExtractionOutcome['contact'],
+): boolean {
+  return !!(
+    c.email?.trim() &&
+    c.phoneNumber?.trim() &&
+    c.name?.trim()
+  );
 }
 
 export function hasAnyContact(c: ContactExtractionOutcome['contact']): boolean {

@@ -97,10 +97,32 @@ export class NYCOpenDataService {
     );
   }
 
+  private ownerNameFromRecord(record: Record<string, string>): string | undefined {
+    const firstName = (record.owner_s_first_name || '').trim();
+    const lastName = (record.owner_s_last_name || '').trim();
+    const businessName = (record.owner_s_business_name || '').trim();
+    if (firstName || lastName) {
+      return [firstName, lastName].filter(Boolean).join(' ') || undefined;
+    }
+    if (businessName && businessName.toUpperCase() !== 'N/A') {
+      return businessName;
+    }
+    return undefined;
+  }
+
+  private applicantNameFromRecord(record: Record<string, string>): string | undefined {
+    const firstName = (record.applicant_s_first_name || '').trim();
+    const lastName = (record.applicant_s_last_name || '').trim();
+    if (!firstName && !lastName) {
+      return undefined;
+    }
+    return [firstName, lastName].filter(Boolean).join(' ');
+  }
+
   /**
    * Fetches owner name and phone from the DOB Job Application Filings dataset.
    * The `bin__` column (note double underscore) is the BIN field in this dataset.
-   * Returns the most recent record that has a phone number, or the most recent record overall.
+   * Phone scans all records for owner_sphone__; name prefers owner then applicant (no applicant phone in API).
    */
   async getOwnerContactFromJobApplications(bin: string): Promise<{
     name?: string;
@@ -115,7 +137,7 @@ export class NYCOpenDataService {
         params: {
           $where: `bin__ = '${bin}'`,
           $select:
-            'owner_s_first_name,owner_s_last_name,owner_s_business_name,owner_sphone__',
+            'owner_s_first_name,owner_s_last_name,owner_s_business_name,owner_sphone__,applicant_s_first_name,applicant_s_last_name',
           $order: 'latest_action_date DESC',
           $limit: 10,
         },
@@ -133,26 +155,40 @@ export class NYCOpenDataService {
         return null;
       }
 
-      const withPhone = records.find(
-        (r) => r.owner_sphone__ && r.owner_sphone__.trim(),
-      );
-      const record = withPhone || records[0];
-
-      const firstName = (record.owner_s_first_name || '').trim();
-      const lastName = (record.owner_s_last_name || '').trim();
-      const businessName = (record.owner_s_business_name || '').trim();
-
-      let name: string | undefined;
-      if (firstName || lastName) {
-        name = [firstName, lastName].filter(Boolean).join(' ') || undefined;
-      } else if (businessName && businessName.toUpperCase() !== 'N/A') {
-        name = businessName;
+      let phoneNumber: string | undefined;
+      let phoneRecordIndex: number | undefined;
+      for (let i = 0; i < records.length; i++) {
+        const p = records[i].owner_sphone__?.trim();
+        if (p) {
+          phoneNumber = p;
+          phoneRecordIndex = i;
+          break;
+        }
       }
 
-      const phoneNumber = record.owner_sphone__?.trim() || undefined;
+      let name: string | undefined;
+      let nameSource = 'none';
+      for (let i = 0; i < records.length; i++) {
+        const ownerName = this.ownerNameFromRecord(records[i]);
+        if (ownerName) {
+          name = ownerName;
+          nameSource = `owner@record${i}`;
+          break;
+        }
+      }
+      if (!name) {
+        for (let i = 0; i < records.length; i++) {
+          const applicantName = this.applicantNameFromRecord(records[i]);
+          if (applicantName) {
+            name = applicantName;
+            nameSource = `applicant@record${i}`;
+            break;
+          }
+        }
+      }
 
       console.log(
-        `API owner contact for BIN ${bin}: name=${name || '(none)'}, phone=${phoneNumber || '(none)'}`,
+        `API owner contact for BIN ${bin}: name=${name || '(none)'} (${nameSource}), phone=${phoneNumber || '(none)'}${phoneRecordIndex !== undefined ? ` (record ${phoneRecordIndex})` : ''}`,
       );
       return { name, phoneNumber };
     } catch (error) {
