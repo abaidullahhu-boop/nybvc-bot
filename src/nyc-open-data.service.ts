@@ -97,6 +97,69 @@ export class NYCOpenDataService {
     );
   }
 
+  /**
+   * Fetches owner name and phone from the DOB Job Application Filings dataset.
+   * The `bin__` column (note double underscore) is the BIN field in this dataset.
+   * Returns the most recent record that has a phone number, or the most recent record overall.
+   */
+  async getOwnerContactFromJobApplications(bin: string): Promise<{
+    name?: string;
+    phoneNumber?: string;
+  } | null> {
+    try {
+      const url = 'https://data.cityofnewyork.us/resource/ic3t-wcy2.json';
+      const response = await axios.get(url, {
+        headers: this.socrataAppToken
+          ? { 'X-App-Token': this.socrataAppToken }
+          : {},
+        params: {
+          $where: `bin__ = '${bin}'`,
+          $select:
+            'owner_s_first_name,owner_s_last_name,owner_s_business_name,owner_sphone__',
+          $order: 'latest_action_date DESC',
+          $limit: 10,
+        },
+      });
+
+      const records: any[] = response.data || [];
+      if (records.length === 0) {
+        console.log(
+          `No job application records found for BIN ${bin} in DOB dataset`,
+        );
+        return null;
+      }
+
+      const withPhone = records.find(
+        (r) => r.owner_sphone__ && r.owner_sphone__.trim(),
+      );
+      const record = withPhone || records[0];
+
+      const firstName = (record.owner_s_first_name || '').trim();
+      const lastName = (record.owner_s_last_name || '').trim();
+      const businessName = (record.owner_s_business_name || '').trim();
+
+      let name: string | undefined;
+      if (firstName || lastName) {
+        name = [firstName, lastName].filter(Boolean).join(' ') || undefined;
+      } else if (businessName && businessName.toUpperCase() !== 'N/A') {
+        name = businessName;
+      }
+
+      const phoneNumber = record.owner_sphone__?.trim() || undefined;
+
+      console.log(
+        `API owner contact for BIN ${bin}: name=${name || '(none)'}, phone=${phoneNumber || '(none)'}`,
+      );
+      return { name, phoneNumber };
+    } catch (error) {
+      this.handleAxiosError(
+        error,
+        `Failed to fetch owner contact from job applications for BIN ${bin}`,
+      );
+      return null;
+    }
+  }
+
   async getNewBinsToday(): Promise<string[]> {
     //const today = dayjs().tz('America/New_York').format('YYYYMMDD');
     console.log(`Fetching the 200 most recent BINs`);

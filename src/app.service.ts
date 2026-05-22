@@ -103,40 +103,53 @@ export class AppService {
         const waitTime = Math.floor(Math.random() * 120000) + 60000; // 1 minute to 3 minutes
         console.log(`Waiting for ${waitTime / 60000} minutes...`);
         await new Promise((resolve) => setTimeout(resolve, waitTime));
+
+        // Step 1: get name and phone from the NYC Open Data API (no Akamai risk)
+        const apiContact =
+          await this.nycOpenDataService.getOwnerContactFromJobApplications(bin);
+
+        // Step 2: attempt BIS scraping — only care about email from here
         const bisOutcome = await this.dobScraperService.getBisContactInfo(bin);
-        let contact = { ...bisOutcome.contact };
         const mergedNotes = [...bisOutcome.notes];
         let deniedUrl = bisOutcome.deniedUrl || '';
 
-        const needsEmail = !contact.email?.trim();
-        const needsMore =
-          needsEmail || !contact.phoneNumber?.trim() || !contact.name?.trim();
+        let email = bisOutcome.contact.email?.trim() || '';
 
-        if (needsMore) {
-          const dobNowOutcome = await this.dobScraperService.scrapeDobNow(bin);
-          contact = mergeContact(contact, dobNowOutcome.contact);
+        // If no email yet, try DOB NOW as a second source
+        if (!email) {
+          const dobNowOutcome =
+            await this.dobScraperService.scrapeDobNow(bin);
           mergedNotes.push(...dobNowOutcome.notes);
           if (!deniedUrl && dobNowOutcome.deniedUrl) {
             deniedUrl = dobNowOutcome.deniedUrl;
           }
+          email = dobNowOutcome.contact.email?.trim() || '';
         }
 
-        const email = contact.email || '';
-        const phone = contact.phoneNumber || '';
-        const name = contact.name || '';
+        // Step 3: compose final values — API name/phone take priority; fall
+        // back to whatever scraping managed to extract
+        const name =
+          apiContact?.name ||
+          bisOutcome.contact.name?.trim() ||
+          '';
+        const phone =
+          apiContact?.phoneNumber ||
+          bisOutcome.contact.phoneNumber?.trim() ||
+          '';
+
         const reason =
           mergedNotes.length > 0 ? formatReasonFromNotes(mergedNotes) : '';
 
         const row = [bin];
-        row.push(email !== 'string' && email !== '' ? email : 'Email not found');
-        row.push(phone !== 'string' && phone !== '' ? phone : 'Phone not found');
-        row.push(name !== 'string' && name !== '' ? name : 'Name not found');
+        row.push(email || 'Email not found');
+        row.push(phone || 'Phone not found');
+        row.push(name || 'Name not found');
         row.push(deniedUrl || '');
         row.push(reason);
 
         await this.googleSheetService.appendRow(sheetId, sheetName, [row]);
         console.log(
-          `Appended row for BIN ${bin}: [${row.join(', ')}] | hasContact=${hasAnyContact(contact)}`,
+          `Appended row for BIN ${bin}: email=${email || 'N/A'}, phone=${phone || 'N/A'}, name=${name || 'N/A'}, deniedUrl=${deniedUrl || 'N/A'}`,
         );
       }
     } catch (error) {
