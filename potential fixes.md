@@ -70,6 +70,12 @@
 - Do we want to append `reason_code` as a new Google Sheet column now?
 - Should BIS failures be retried later in a secondary "requeue" pass instead of immediately falling through to DOB NOW?
 
+## Implemented (web search fallback)
+
+- SerpAPI search when scrape finds no email (`google-search.service.ts`, `email-extractor.service.ts`).
+- Owner name searched first, then applicant; requires `SERP_API_KEY`.
+- Richer `ic3t-wcy2` fields (address, borough, applicant title) for query quality.
+
 ## Next Actions
 
 - [ ] Implement BIS error-page detection + retry trigger.

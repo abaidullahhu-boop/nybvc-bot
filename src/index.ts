@@ -6,6 +6,7 @@ import { ResendMailService } from './resend-mail.service';
 import { DobScraperService } from './dob-scrapper.service';
 import { GeminiService } from './gemini.service';
 import { GoogleSheetService } from './google-sheet.service';
+import { GoogleSearchService } from './google-search.service';
 import { BinTrackerService } from './bin-tracker.service';
 
 dotenv.config();
@@ -17,6 +18,7 @@ export function createServices() {
   const nycOpenDataService = new NYCOpenDataService();
   const resendMailService = new ResendMailService();
   const googleSheetService = new GoogleSheetService();
+  const googleSearchService = new GoogleSearchService();
   const binTrackerService = new BinTrackerService();
 
   return {
@@ -25,12 +27,14 @@ export function createServices() {
     nycOpenDataService,
     resendMailService,
     googleSheetService,
+    googleSearchService,
     binTrackerService,
     appService: new AppService(
       nycOpenDataService,
       resendMailService,
       dobScraperService,
       googleSheetService,
+      googleSearchService,
     ),
   };
 }

@@ -1,4 +1,5 @@
 import axios, { AxiosError } from 'axios';
+import { JobApplicationContact } from './job-application-contact.types';
 import {
   DobEcbViolation,
   DobViolation,
@@ -119,15 +120,28 @@ export class NYCOpenDataService {
     return [firstName, lastName].filter(Boolean).join(' ');
   }
 
+  private addressFromRecord(record: Record<string, string>): string | undefined {
+    const house = (record.house__ || '').trim();
+    const street = (record.street_name || '').trim();
+    const parts = [house, street].filter(Boolean);
+    if (parts.length === 0) {
+      return undefined;
+    }
+    return parts.join(' ');
+  }
+
+  private boroughFromRecord(record: Record<string, string>): string | undefined {
+    const borough = (record.borough || '').trim();
+    return borough || undefined;
+  }
+
   /**
-   * Fetches owner name and phone from the DOB Job Application Filings dataset.
-   * The `bin__` column (note double underscore) is the BIN field in this dataset.
+   * Fetches owner/applicant contact context from DOB Job Application Filings (ic3t-wcy2).
    * Phone scans all records for owner_sphone__; name prefers owner then applicant (no applicant phone in API).
    */
-  async getOwnerContactFromJobApplications(bin: string): Promise<{
-    name?: string;
-    phoneNumber?: string;
-  } | null> {
+  async getOwnerContactFromJobApplications(
+    bin: string,
+  ): Promise<JobApplicationContact | null> {
     try {
       const url = 'https://data.cityofnewyork.us/resource/ic3t-wcy2.json';
       const response = await axios.get(url, {
@@ -137,7 +151,7 @@ export class NYCOpenDataService {
         params: {
           $where: `bin__ = '${bin}'`,
           $select:
-            'owner_s_first_name,owner_s_last_name,owner_s_business_name,owner_sphone__,applicant_s_first_name,applicant_s_last_name',
+            'owner_s_first_name,owner_s_last_name,owner_s_business_name,owner_sphone__,applicant_s_first_name,applicant_s_last_name,applicant_professional_title,applicant_license__,house__,street_name,borough,job_description',
           $order: 'latest_action_date DESC',
           $limit: 10,
         },
@@ -166,31 +180,59 @@ export class NYCOpenDataService {
         }
       }
 
+      let ownerName: string | undefined;
+      let applicantName: string | undefined;
       let name: string | undefined;
-      let nameSource = 'none';
+      let nameSource: 'owner' | 'applicant' | undefined;
+      let contextRecordIndex = 0;
+
       for (let i = 0; i < records.length; i++) {
-        const ownerName = this.ownerNameFromRecord(records[i]);
-        if (ownerName) {
-          name = ownerName;
-          nameSource = `owner@record${i}`;
+        const candidate = this.ownerNameFromRecord(records[i]);
+        if (candidate) {
+          ownerName = candidate;
+          name = candidate;
+          nameSource = 'owner';
+          contextRecordIndex = i;
           break;
         }
       }
-      if (!name) {
-        for (let i = 0; i < records.length; i++) {
-          const applicantName = this.applicantNameFromRecord(records[i]);
-          if (applicantName) {
-            name = applicantName;
-            nameSource = `applicant@record${i}`;
-            break;
+      for (let i = 0; i < records.length; i++) {
+        const candidate = this.applicantNameFromRecord(records[i]);
+        if (candidate) {
+          applicantName = candidate;
+          if (!name) {
+            name = candidate;
+            nameSource = 'applicant';
+            contextRecordIndex = i;
           }
+          break;
         }
       }
 
+      const contextRecord = records[contextRecordIndex] || records[0];
+      const address = this.addressFromRecord(contextRecord);
+      const borough = this.boroughFromRecord(contextRecord);
+      const applicantProfessionalTitle =
+        contextRecord.applicant_professional_title?.trim() || undefined;
+      const applicantLicense =
+        contextRecord.applicant_license__?.trim() || undefined;
+      const jobDescription = contextRecord.job_description?.trim() || undefined;
+
       console.log(
-        `API owner contact for BIN ${bin}: name=${name || '(none)'} (${nameSource}), phone=${phoneNumber || '(none)'}${phoneRecordIndex !== undefined ? ` (record ${phoneRecordIndex})` : ''}`,
+        `API owner contact for BIN ${bin}: name=${name || '(none)'} (${nameSource || 'none'}), phone=${phoneNumber || '(none)'}${phoneRecordIndex !== undefined ? ` (record ${phoneRecordIndex})` : ''}, address=${address || '(none)'}, borough=${borough || '(none)'}`,
       );
-      return { name, phoneNumber };
+      return {
+        name,
+        phoneNumber,
+        nameSource,
+        ownerName,
+        applicantName,
+        applicantProfessionalTitle,
+        applicantLicense,
+        address,
+        borough,
+        jobDescription,
+      };
     } catch (error) {
       this.handleAxiosError(
         error,

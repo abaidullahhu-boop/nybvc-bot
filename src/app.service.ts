@@ -13,11 +13,9 @@ import {
 } from './types';
 import { DobScraperService } from './dob-scrapper.service';
 import { GoogleSheetService } from './google-sheet.service';
-import {
-  formatReasonFromNotes,
-  hasAnyContact,
-  mergeContact,
-} from './contact-extraction.types';
+import { GoogleSearchService } from './google-search.service';
+import { formatReasonFromNotes, DiagnosticNote } from './contact-extraction.types';
+import { JobApplicationContact } from './job-application-contact.types';
 import { Datastore } from '@google-cloud/datastore';
 import * as moment from 'moment-timezone';
 
@@ -31,6 +29,7 @@ export class AppService {
     private readonly resendMailService: ResendMailService,
     private readonly dobScraperService: DobScraperService,
     private readonly googleSheetService: GoogleSheetService,
+    private readonly googleSearchService: GoogleSearchService,
   ) {}
 
   async handleDailyTasks() {
@@ -140,7 +139,14 @@ export class AppService {
           email = dobNowOutcome.contact.email?.trim() || '';
         }
 
-        // Step 3: compose final values — API name/phone take priority; fall
+        // Step 3: web search fallback (owner, then applicant professional)
+        if (!email) {
+          const webSearch = await this.tryWebSearchEmail(apiContact);
+          mergedNotes.push(...webSearch.notes);
+          email = webSearch.email?.trim() || '';
+        }
+
+        // Step 4: compose final values — API name/phone take priority; fall
         // back to whatever scraping managed to extract
         const name =
           apiContact?.name ||
@@ -175,6 +181,98 @@ export class AppService {
       await this.dobScraperService.cleanup();
     }
     console.log('Project 1 workflow completed.');
+  }
+
+  private async tryWebSearchEmail(
+    apiContact: JobApplicationContact | null,
+  ): Promise<{ email?: string; notes: DiagnosticNote[] }> {
+    const notes: DiagnosticNote[] = [];
+
+    if (!this.googleSearchService.isConfigured()) {
+      notes.push({
+        stage: 'web_search',
+        code: 'WEB_SEARCH_SKIPPED_NO_KEY',
+      });
+      return { notes };
+    }
+
+    if (!apiContact) {
+      notes.push({
+        stage: 'web_search',
+        code: 'WEB_SEARCH_SKIPPED_NO_NAME',
+        detail: 'no_api_contact',
+      });
+      return { notes };
+    }
+
+    const searchContext = {
+      address: apiContact.address,
+      borough: apiContact.borough,
+      professionalTitle: apiContact.applicantProfessionalTitle,
+    };
+
+    const ownerTarget = apiContact.ownerName || apiContact.name;
+    const applicantTarget = apiContact.applicantName;
+
+    if (!ownerTarget && !applicantTarget) {
+      notes.push({
+        stage: 'web_search',
+        code: 'WEB_SEARCH_SKIPPED_NO_NAME',
+      });
+      return { notes };
+    }
+
+    if (ownerTarget) {
+      try {
+        const ownerResult = await this.googleSearchService.findEmail({
+          name: ownerTarget,
+          ...searchContext,
+        });
+        if (ownerResult) {
+          notes.push({
+            stage: 'web_search',
+            code: 'WEB_SEARCH_HIT',
+            detail: `owner:${ownerResult.searchQuery}${ownerResult.sourceUrl ? `|${ownerResult.sourceUrl}` : ''}`,
+          });
+          return { email: ownerResult.email, notes };
+        }
+      } catch (error) {
+        notes.push({
+          stage: 'web_search',
+          code: 'WEB_SEARCH_ERROR',
+          detail: `owner:${error instanceof Error ? error.message : String(error)}`,
+        });
+      }
+    }
+
+    if (applicantTarget && applicantTarget !== ownerTarget) {
+      try {
+        const applicantResult = await this.googleSearchService.findEmail({
+          name: applicantTarget,
+          ...searchContext,
+        });
+        if (applicantResult) {
+          notes.push({
+            stage: 'web_search',
+            code: 'WEB_SEARCH_HIT',
+            detail: `applicant:${applicantResult.searchQuery}${applicantResult.sourceUrl ? `|${applicantResult.sourceUrl}` : ''}`,
+          });
+          return { email: applicantResult.email, notes };
+        }
+      } catch (error) {
+        notes.push({
+          stage: 'web_search',
+          code: 'WEB_SEARCH_ERROR',
+          detail: `applicant:${error instanceof Error ? error.message : String(error)}`,
+        });
+      }
+    }
+
+    notes.push({
+      stage: 'web_search',
+      code: 'WEB_SEARCH_NO_EMAIL',
+    });
+    return { notes };
   }
 
   public async runProject2() {

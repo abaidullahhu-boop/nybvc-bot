@@ -13,7 +13,12 @@ export type DiagnosticCode =
   | 'DOBNOW_UI_TIMEOUT'
   | 'DOBNOW_NO_ASBESTOS_PDF'
   | 'DOBNOW_ERROR'
-  | 'ACCESS_POSSIBLE_BLOCK';
+  | 'ACCESS_POSSIBLE_BLOCK'
+  | 'WEB_SEARCH_HIT'
+  | 'WEB_SEARCH_NO_EMAIL'
+  | 'WEB_SEARCH_SKIPPED_NO_KEY'
+  | 'WEB_SEARCH_SKIPPED_NO_NAME'
+  | 'WEB_SEARCH_ERROR';
 
 export interface DiagnosticNote {
   stage: string;
