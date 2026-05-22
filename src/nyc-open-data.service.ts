@@ -135,6 +135,25 @@ export class NYCOpenDataService {
     return borough || undefined;
   }
 
+  private summarizeJobApplicationRecords(
+    records: Record<string, string>[],
+  ): string {
+    if (records.length === 0) {
+      return 'none';
+    }
+    return records
+      .slice(0, 5)
+      .map((record, index) => {
+        const owner = this.ownerNameFromRecord(record) || '(no owner name)';
+        const applicant =
+          this.applicantNameFromRecord(record) || '(no applicant name)';
+        const phone = record.owner_sphone__?.trim() || '(no phone)';
+        const address = this.addressFromRecord(record) || '(no address)';
+        return `[${index}] owner=${owner}; applicant=${applicant}; phone=${phone}; address=${address}`;
+      })
+      .join(' | ');
+  }
+
   /**
    * Fetches owner/applicant contact context from DOB Job Application Filings (ic3t-wcy2).
    * Phone scans all records for owner_sphone__; name prefers owner then applicant (no applicant phone in API).
@@ -159,8 +178,7 @@ export class NYCOpenDataService {
 
       const records: any[] = response.data || [];
       console.log(
-        `DOB job applications API response for BIN ${bin} (${records.length} records):`,
-        JSON.stringify(records, null, 2),
+        `DOB job applications API for BIN ${bin}: ${records.length} record(s) — ${this.summarizeJobApplicationRecords(records)}`,
       );
       if (records.length === 0) {
         console.log(
@@ -413,9 +431,12 @@ export class NYCOpenDataService {
     if (axios.isAxiosError(error)) {
       const axiosError = error as AxiosError;
       if (axiosError.response) {
+        const dataPreview =
+          typeof axiosError.response.data === 'string'
+            ? axiosError.response.data.slice(0, 300)
+            : JSON.stringify(axiosError.response.data).slice(0, 300);
         console.error(
-          `${message} - Status: ${axiosError.response.status}, Data:`,
-          axiosError.response.data,
+          `${message} - Status: ${axiosError.response.status}, Data: ${dataPreview}`,
         );
       } else if (axiosError.request) {
         console.error(`${message} - No response received:`, axiosError.request);

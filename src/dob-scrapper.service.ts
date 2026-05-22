@@ -15,6 +15,7 @@ import {
   hasFullContact,
   mergeContact,
 } from './contact-extraction.types';
+import { formatBodyLogPreview, formatHtmlLogPreview } from './log-preview.util';
 
 type BisSectionContact = {
   name?: string;
@@ -125,7 +126,9 @@ export class DobScraperService {
       await page.screenshot({ path: screenshotPath, fullPage: true });
       console.log(`Saved screenshot: ${screenshotPath}`);
       const html = await page.content();
-      console.log(`Page content preview (${label}):`, html.slice(0, 2000));
+      console.log(
+        `Page content preview (${label}): ${formatHtmlLogPreview(html)}`,
+      );
       return screenshotPath;
     } catch (err) {
       console.warn(`Debug capture failed for ${label}: ${err.message}`);
@@ -603,7 +606,10 @@ export class DobScraperService {
       `PDF buffer saved to ${pdfPath} | size=${sizeKb}KB | header="${header}" | isPDF=${isPdf}`,
     );
     if (!isPdf) {
-      const preview = buffer.slice(0, 300).toString('utf8').replace(/\n/g, ' ');
+      const preview = formatBodyLogPreview(
+        buffer.slice(0, 300).toString('utf8'),
+        200,
+      );
       console.warn(`Non-PDF content received. Preview: ${preview}`);
     }
     return { path: pdfPath, isPdf };
@@ -684,7 +690,10 @@ export class DobScraperService {
       const contentType = response.headers()['content-type'] || '';
       const status = response.status();
       if (!response.ok() || !contentType.includes('application/pdf')) {
-        const preview = (await response.text().catch(() => '')).slice(0, 200);
+        const preview = formatBodyLogPreview(
+          (await response.text().catch(() => '')).slice(0, 500),
+          200,
+        );
         console.error(
           `Failed to download PDF. Status: ${status}, Content-Type: ${contentType}, Preview: ${preview}`,
         );
