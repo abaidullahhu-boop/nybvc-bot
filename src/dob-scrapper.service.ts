@@ -569,20 +569,20 @@ export class DobScraperService {
     };
   }
 
-  private savePdfBuffer(buffer: Buffer): string {
+  private savePdfBuffer(buffer: Buffer): { path: string; isPdf: boolean } {
     const pdfPath = `temp_${Date.now()}.pdf`;
     fs.writeFileSync(pdfPath, buffer);
     const sizeKb = (buffer.byteLength / 1024).toFixed(1);
     const header = buffer.slice(0, 5).toString('ascii');
     const isPdf = header.startsWith('%PDF');
     console.log(
-      `PDF downloaded successfully to ${pdfPath} | size=${sizeKb}KB | header="${header}" | isPDF=${isPdf}`,
+      `PDF buffer saved to ${pdfPath} | size=${sizeKb}KB | header="${header}" | isPDF=${isPdf}`,
     );
     if (!isPdf) {
       const preview = buffer.slice(0, 300).toString('utf8').replace(/\n/g, ' ');
       console.warn(`Non-PDF content received. Preview: ${preview}`);
     }
-    return pdfPath;
+    return { path: pdfPath, isPdf };
   }
 
   /**
@@ -642,7 +642,14 @@ export class DobScraperService {
       if (response?.ok()) {
         const contentType = response.headers()['content-type'] || '';
         if (contentType.includes('application/pdf')) {
-          return { path: this.savePdfBuffer(await response.body()) };
+          const saved = this.savePdfBuffer(await response.body());
+          if (saved.isPdf) {
+            return { path: saved.path };
+          }
+          // Browser PDF viewer intercepted — buffer is viewer HTML, not raw PDF
+          console.warn(
+            `Browser intercepted PDF as viewer HTML via pdfResponsePromise; falling back to direct fetch`,
+          );
         }
       }
 
@@ -666,7 +673,21 @@ export class DobScraperService {
         };
       }
 
-      return { path: this.savePdfBuffer(await response.body()) };
+      const saved = this.savePdfBuffer(await response.body());
+      if (!saved.isPdf) {
+        // Server returned 200 with application/pdf content-type but body is not a PDF
+        // (e.g. Chrome PDF viewer HTML or another proxy page)
+        console.error(
+          `PDF URL returned non-PDF bytes despite 200/application/pdf headers`,
+        );
+        return {
+          path: null,
+          deniedUrl: pdfUrl,
+          status,
+          detail: `status=200, content-type=${contentType} but body is not a valid PDF`,
+        };
+      }
+      return { path: saved.path };
     } catch (error) {
       console.error(`Error downloading PDF: ${error.message}`);
       await this.debugPage(page, 'bis-pdf-error');
