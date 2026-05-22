@@ -122,6 +122,10 @@ export class NYCOpenDataService {
       });
 
       const records: any[] = response.data || [];
+      console.log(
+        `DOB job applications API response for BIN ${bin} (${records.length} records):`,
+        JSON.stringify(records, null, 2),
+      );
       if (records.length === 0) {
         console.log(
           `No job application records found for BIN ${bin} in DOB dataset`,
