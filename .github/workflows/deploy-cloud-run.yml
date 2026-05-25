@@ -82,6 +82,7 @@ jobs:
           RUN_HTTP_SERVER: "true"
           HTTP_PROXY: '${{ secrets.HTTP_PROXY }}'
           HTTPS_PROXY: '${{ secrets.HTTPS_PROXY }}'
+          SERP_API_KEY: '${{ secrets.SERP_API_KEY }}'
           EOF
 
       - name: Build and push Docker image
