@@ -47,7 +47,7 @@ export class AppService {
     specificBins: string[] = [],
     sheetDate?: string,
   ): Promise<void> {
-    console.log('Starting Project 1 workflow...');
+    console.log('Starting Project 1 workflow (phased: API -> SerpAPI -> Scrape)...');
     const binsToProcess = Array.from(new Set(specificBins || []));
 
     if (binsToProcess.length === 0) {
@@ -55,126 +55,208 @@ export class AppService {
       return;
     }
 
-    try {
-      // Allow overriding the sheet date to backfill past days
-      const targetDate = sheetDate
-        ? moment.tz(sheetDate, 'America/New_York')
-        : moment().tz('America/New_York');
+    // Allow overriding the sheet date to backfill past days
+    const targetDate = sheetDate
+      ? moment.tz(sheetDate, 'America/New_York')
+      : moment().tz('America/New_York');
 
-      if (!targetDate.isValid()) {
-        throw new Error(
-          `Invalid sheetDate provided (${sheetDate}). Use MM/DD/YYYY or YYYY-MM-DD format.`,
-        );
-      }
-
-      const sheetName = targetDate.format('MM/DD/YYYY');
-      const sheetId = process.env.PROJECT1_GOOGLE_SHEET_ID;
-
-      if (!sheetId) {
-        console.error(
-          'PROJECT1_GOOGLE_SHEET_ID environment variable is not set',
-        );
-        return;
-      }
-
-      // Check if sheet exists for the target date, create if not
-      console.log(`Checking if sheet for ${sheetName} exists...`);
-      const sheetExists = await this.googleSheetService.sheetExists(
-        sheetId,
-        sheetName,
+    if (!targetDate.isValid()) {
+      console.error(
+        `Invalid sheetDate provided (${sheetDate}). Use MM/DD/YYYY or YYYY-MM-DD format.`,
       );
+      return;
+    }
 
-      if (!sheetExists) {
-        console.log(`Creating new sheet for ${sheetName}...`);
-        await this.googleSheetService.createSheet(sheetId, sheetName);
-        // Add header row
-        await this.googleSheetService.appendRow(sheetId, sheetName, [
-          [
-            'BIN',
-            'Email',
-            'Phone',
-            'Name',
-            'Denied URL',
-            'Reason',
-          ],
-        ]);
-        console.log(`Created new sheet for ${sheetName} with headers`);
-      } else {
-        console.log(`Sheet for ${sheetName} already exists`);
-      }
+    const sheetName = targetDate.format('MM/DD/YYYY');
+    const sheetId = process.env.PROJECT1_GOOGLE_SHEET_ID;
 
-      await this.dobScraperService.initializeBrowser();
-      for (const bin of binsToProcess) {
-        console.log(`Processing BIN ${bin}`);
-        const waitTime = Math.floor(Math.random() * 120000) + 60000; // 1 minute to 3 minutes
-        console.log(`Waiting for ${waitTime / 60000} minutes...`);
-        await new Promise((resolve) => setTimeout(resolve, waitTime));
+    if (!sheetId) {
+      console.error(
+        'PROJECT1_GOOGLE_SHEET_ID environment variable is not set',
+      );
+      return;
+    }
 
-        // Step 1: get name and phone from the NYC Open Data API (no Akamai risk)
+    // Phase 0: ensure sheet + 8-col header
+    console.log(`Checking if sheet for ${sheetName} exists...`);
+    const sheetExists = await this.googleSheetService.sheetExists(
+      sheetId,
+      sheetName,
+    );
+
+    if (!sheetExists) {
+      console.log(`Creating new sheet for ${sheetName}...`);
+      await this.googleSheetService.createSheet(sheetId, sheetName);
+      await this.googleSheetService.appendRow(sheetId, sheetName, [
+        [
+          'BIN',
+          'Email',
+          'Phone',
+          'Name',
+          'Denied URL',
+          'Reason',
+          'BIN scraped',
+          'scrapedEmail',
+        ],
+      ]);
+      console.log(`Created new sheet for ${sheetName} with headers`);
+    } else {
+      console.log(`Sheet for ${sheetName} already exists`);
+    }
+
+    // Per-BIN state shared across phases
+    const rowIndexByBin = new Map<string, number>();
+    const apiContactByBin = new Map<string, JobApplicationContact | null>();
+    const notesByBin = new Map<string, DiagnosticNote[]>();
+    for (const bin of binsToProcess) {
+      notesByBin.set(bin, []);
+    }
+
+    // ------------------------------------------------------------------
+    // Phase 1 — NYC Open Data API: name + phone for every BIN
+    // ------------------------------------------------------------------
+    console.log(`Phase 1: fetching Open Data API contacts for ${binsToProcess.length} BINs`);
+    for (const bin of binsToProcess) {
+      try {
         const apiContact =
           await this.nycOpenDataService.getOwnerContactFromJobApplications(bin);
+        apiContactByBin.set(bin, apiContact);
 
-        // Step 2: attempt BIS scraping — only care about email from here
-        const bisOutcome = await this.dobScraperService.getBisContactInfo(bin);
-        const mergedNotes = [...bisOutcome.notes];
-        let deniedUrl =
-          bisOutcome.lastAttemptedUrl ||
-          bisOutcome.deniedUrl ||
-          '';
+        const phone = apiContact?.phoneNumber?.trim() || '';
+        const name = apiContact?.name?.trim() || '';
 
-        let email = bisOutcome.contact.email?.trim() || '';
+        const row = [
+          bin,
+          '',
+          phone || 'Phone not found',
+          name || 'Name not found',
+          '',
+          '',
+          'no',
+          '',
+        ];
 
-        // If no email yet, try DOB NOW as a second source
-        if (!email) {
-          const dobNowOutcome =
-            await this.dobScraperService.scrapeDobNow(bin);
-          mergedNotes.push(...dobNowOutcome.notes);
-          if (!deniedUrl && dobNowOutcome.deniedUrl) {
-            deniedUrl = dobNowOutcome.deniedUrl;
-          }
-          if (!deniedUrl && dobNowOutcome.lastAttemptedUrl) {
-            deniedUrl = dobNowOutcome.lastAttemptedUrl;
-          }
-          email = dobNowOutcome.contact.email?.trim() || '';
-        }
-
-        // Step 3: web search fallback (owner, then applicant professional)
-        if (!email) {
-          const webSearch = await this.tryWebSearchEmail(apiContact);
-          mergedNotes.push(...webSearch.notes);
-          email = webSearch.email?.trim() || '';
-        }
-
-        // Step 4: compose final values — API name/phone take priority; fall
-        // back to whatever scraping managed to extract
-        const name =
-          apiContact?.name ||
-          bisOutcome.contact.name?.trim() ||
-          '';
-        const phone =
-          apiContact?.phoneNumber ||
-          bisOutcome.contact.phoneNumber?.trim() ||
-          '';
-        const reason =
-          mergedNotes.length > 0 ? formatReasonFromNotes(mergedNotes) : '';
-
-        const row = [bin];
-        row.push(email || 'Email not found');
-        row.push(phone || 'Phone not found');
-        row.push(name || 'Name not found');
-        row.push(deniedUrl || '');
-        row.push(reason);
-
-        await this.googleSheetService.appendRow(sheetId, sheetName, [row]);
-        console.log(
-          `Appended row for BIN ${bin}: email=${email || 'N/A'}, phone=${phone || 'N/A'}, name=${name || 'N/A'}, deniedUrl=${deniedUrl || 'N/A'}`,
+        const rowIndex = await this.googleSheetService.appendRowReturningIndex(
+          sheetId,
+          sheetName,
+          row,
         );
+        rowIndexByBin.set(bin, rowIndex);
+        console.log(
+          `Phase 1 BIN ${bin} -> row ${rowIndex}: name=${name || 'N/A'}, phone=${phone || 'N/A'}`,
+        );
+      } catch (error) {
+        console.error(`Phase 1 failed for BIN ${bin}:`, error);
+      }
+    }
+
+    // ------------------------------------------------------------------
+    // Phase 2 — SerpAPI: email for every BIN
+    // ------------------------------------------------------------------
+    console.log(`Phase 2: SerpAPI email lookup for ${binsToProcess.length} BINs`);
+    for (const bin of binsToProcess) {
+      const rowIndex = rowIndexByBin.get(bin);
+      if (!rowIndex) {
+        console.warn(`Phase 2 skipped for BIN ${bin}: no row index (Phase 1 likely failed)`);
+        continue;
+      }
+      try {
+        const webSearch = await this.tryWebSearchEmail(
+          apiContactByBin.get(bin) ?? null,
+        );
+        notesByBin.get(bin)!.push(...webSearch.notes);
+        const email = webSearch.email?.trim() || '';
+        await this.googleSheetService.updateRange(
+          sheetId,
+          sheetName,
+          `B${rowIndex}`,
+          [[email || 'Email not found']],
+        );
+        console.log(
+          `Phase 2 BIN ${bin} -> row ${rowIndex}: email=${email || 'N/A'}`,
+        );
+      } catch (error) {
+        console.error(`Phase 2 failed for BIN ${bin}:`, error);
+      }
+    }
+
+    // ------------------------------------------------------------------
+    // Phase 3 — Scraping (BIS -> DOB NOW): scrapedEmail + scraped flag
+    // ------------------------------------------------------------------
+    console.log(`Phase 3: scraping BIS/DOB NOW for ${binsToProcess.length} BINs`);
+    try {
+      await this.dobScraperService.initializeBrowser();
+      for (const bin of binsToProcess) {
+        const rowIndex = rowIndexByBin.get(bin);
+        if (!rowIndex) {
+          console.warn(`Phase 3 skipped for BIN ${bin}: no row index`);
+          continue;
+        }
+
+        console.log(`Phase 3 processing BIN ${bin} (row ${rowIndex})`);
+        // Keep the 1-3 minute random delay here (Akamai)
+        const waitTime = Math.floor(Math.random() * 120000) + 60000;
+        console.log(`Phase 3 waiting ${(waitTime / 60000).toFixed(2)} minutes before BIN ${bin}...`);
+        await new Promise((resolve) => setTimeout(resolve, waitTime));
+
+        let scrapedEmail = '';
+        let deniedUrl = '';
+        try {
+          const bisOutcome = await this.dobScraperService.getBisContactInfo(bin);
+          notesByBin.get(bin)!.push(...bisOutcome.notes);
+          scrapedEmail = bisOutcome.contact.email?.trim() || '';
+          deniedUrl =
+            bisOutcome.lastAttemptedUrl || bisOutcome.deniedUrl || '';
+
+          if (!scrapedEmail) {
+            const dobNowOutcome =
+              await this.dobScraperService.scrapeDobNow(bin);
+            notesByBin.get(bin)!.push(...dobNowOutcome.notes);
+            if (!deniedUrl && dobNowOutcome.deniedUrl) {
+              deniedUrl = dobNowOutcome.deniedUrl;
+            }
+            if (!deniedUrl && dobNowOutcome.lastAttemptedUrl) {
+              deniedUrl = dobNowOutcome.lastAttemptedUrl;
+            }
+            scrapedEmail = dobNowOutcome.contact.email?.trim() || '';
+          }
+        } catch (error) {
+          console.error(`Phase 3 scrape failed for BIN ${bin}:`, error);
+          notesByBin.get(bin)!.push({
+            stage: 'scrape',
+            code: 'SCRAPE_ERROR',
+            detail: error instanceof Error ? error.message : String(error),
+          });
+        }
+
+        const notes = notesByBin.get(bin)!;
+        const reason = notes.length > 0 ? formatReasonFromNotes(notes) : '';
+
+        try {
+          await this.googleSheetService.updateRange(
+            sheetId,
+            sheetName,
+            `E${rowIndex}:H${rowIndex}`,
+            [[
+              deniedUrl || '',
+              reason,
+              'yes',
+              scrapedEmail || 'Email not found',
+            ]],
+          );
+          console.log(
+            `Phase 3 BIN ${bin} -> row ${rowIndex}: scrapedEmail=${scrapedEmail || 'N/A'}, deniedUrl=${deniedUrl || 'N/A'}`,
+          );
+        } catch (error) {
+          console.error(`Phase 3 sheet update failed for BIN ${bin}:`, error);
+        }
       }
     } catch (error) {
-      console.error('Project 1 workflow failed:', error);
+      console.error('Phase 3 workflow failed:', error);
     } finally {
       await this.dobScraperService.cleanup();
     }
+
     console.log('Project 1 workflow completed.');
   }
 
