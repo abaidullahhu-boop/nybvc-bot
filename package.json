@@ -9,6 +9,7 @@
   },
   "dependencies": {
     "@google-cloud/datastore": "^9.2.1",
+    "@google-cloud/tasks": "^6.2.2",
     "@google/generative-ai": "^0.21.0",
     "axios": "^1.7.9",
     "cheerio": "^1.0.0",
