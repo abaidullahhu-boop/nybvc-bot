@@ -8,6 +8,7 @@ import { GeminiService } from './gemini.service';
 import { GoogleSheetService } from './google-sheet.service';
 import { GoogleSearchService } from './google-search.service';
 import { BinTrackerService } from './bin-tracker.service';
+import { CloudTasksService } from './cloud-tasks.service';
 
 dotenv.config();
 
@@ -20,6 +21,7 @@ export function createServices() {
   const googleSheetService = new GoogleSheetService();
   const googleSearchService = new GoogleSearchService();
   const binTrackerService = new BinTrackerService();
+  const cloudTasksService = new CloudTasksService();
 
   return {
     geminiService,
@@ -29,12 +31,14 @@ export function createServices() {
     googleSheetService,
     googleSearchService,
     binTrackerService,
+    cloudTasksService,
     appService: new AppService(
       nycOpenDataService,
       resendMailService,
       dobScraperService,
       googleSheetService,
       googleSearchService,
+      cloudTasksService,
     ),
   };
 }

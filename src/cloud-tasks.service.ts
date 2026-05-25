@@ -1,93 +1,128 @@
-// import { CloudTasksClient } from '@google-cloud/tasks';
-// import * as dotenv from 'dotenv';
+// @ts-ignore — package is installed during the Docker build via package.json;
+// local node_modules may not have the types resolved during agent edits.
+import { CloudTasksClient } from '@google-cloud/tasks';
+import { DiagnosticNote } from './contact-extraction.types';
 
-// dotenv.config();
+/**
+ * Payload accepted by the /scrape-bin endpoint. Cloud Tasks dispatches one of
+ * these per BIN so the per-BIN scrape stays well under Cloud Run's 60-minute
+ * request timeout.
+ */
+export interface ScrapeBinTaskPayload {
+  bin: string;
+  rowIndex: number;
+  sheetName: string;
+  priorNotes: DiagnosticNote[];
+}
 
-// export class CloudTasksService {
-//   private client: CloudTasksClient;
-//   private projectId: string;
-//   private location: string;
-//   private queueName: string;
-//   private serviceAccountEmail: string;
-//   private serviceUrl: string;
+/**
+ * Thin wrapper over Google Cloud Tasks. The Cloud Run service that runs this
+ * code acts as the *enqueuer*; the queue then dispatches HTTP requests to
+ * ${SERVICE_URL}/scrape-bin one-at-a-time (configured via the queue's
+ * max-concurrent-dispatches and max-dispatches-per-second), which gives us
+ * the Akamai-friendly pacing for free without any in-process setTimeout.
+ *
+ * Configuration via env vars (already wired in the deploy workflow):
+ *   GCP_PROJECT_ID, GCP_LOCATION, CLOUD_TASKS_QUEUE_NAME,
+ *   CLOUD_TASKS_SERVICE_ACCOUNT (for OIDC), SERVICE_URL
+ */
+export class CloudTasksService {
+  // @ts-ignore — runtime type comes from @google-cloud/tasks
+  private readonly client: CloudTasksClient | null = null;
+  private readonly projectId: string;
+  private readonly location: string;
+  private readonly queueName: string;
+  private readonly serviceAccountEmail: string;
+  private readonly serviceUrl: string;
+  private readonly configured: boolean;
 
-//   constructor() {
-//     this.client = new CloudTasksClient();
-//     this.projectId = process.env.GCP_PROJECT_ID || '';
-//     this.location = process.env.GCP_LOCATION || 'us-central1';
-//     this.queueName =
-//       process.env.CLOUD_TASKS_QUEUE_NAME || 'bins-processing-queue';
-//     this.serviceAccountEmail = process.env.CLOUD_TASKS_SERVICE_ACCOUNT || '';
-//     this.serviceUrl = process.env.SERVICE_URL || '';
+  constructor() {
+    this.projectId = (process.env.GCP_PROJECT_ID || '').trim();
+    this.location = (process.env.GCP_LOCATION || '').trim();
+    this.queueName = (process.env.CLOUD_TASKS_QUEUE_NAME || '').trim();
+    this.serviceAccountEmail = (
+      process.env.CLOUD_TASKS_SERVICE_ACCOUNT || ''
+    ).trim();
+    this.serviceUrl = (process.env.SERVICE_URL || '').trim();
 
-//     if (!this.projectId) {
-//       throw new Error('GCP_PROJECT_ID environment variable is required');
-//     }
+    this.configured = !!(
+      this.projectId &&
+      this.location &&
+      this.queueName &&
+      this.serviceUrl
+    );
 
-//     if (!this.serviceUrl) {
-//       throw new Error('SERVICE_URL environment variable is required');
-//     }
-//   }
+    if (this.configured) {
+      try {
+        this.client = new CloudTasksClient();
+        console.log(
+          `CloudTasksService configured: projectId=${this.projectId}, location=${this.location}, queue=${this.queueName}, target=${this.serviceUrl}, oidcSA=${this.serviceAccountEmail || '(none)'}`,
+        );
+      } catch (err) {
+        console.error('CloudTasksClient init failed:', err);
+        this.client = null;
+      }
+    } else {
+      console.log(
+        `CloudTasksService disabled (missing one of GCP_PROJECT_ID/GCP_LOCATION/CLOUD_TASKS_QUEUE_NAME/SERVICE_URL). Phase 3 will fall back to in-process scraping.`,
+      );
+    }
+  }
 
-//   /**
-//    * Creates a task to process a batch of BINs
-//    * @param bins Array of BIN numbers to process
-//    * @param endpoint The endpoint to call (default: '/process-bins')
-//    * @returns The created task name
-//    */
-//   async createProcessBinsTask(
-//     bins: string[],
-//     endpoint: string = '/process-bins',
-//     sheetDate?: string,
-//   ): Promise<string> {
-//     const parent = this.client.queuePath(
-//       this.projectId,
-//       this.location,
-//       this.queueName,
-//     );
+  isConfigured(): boolean {
+    return this.configured && !!this.client;
+  }
 
-//     // Construct the request body
-//     const url = `${this.serviceUrl}${endpoint}`;
-//     const payload: any = { bins };
-//     if (sheetDate) {
-//       payload.sheetDate = sheetDate;
-//     }
+  /**
+   * Enqueue a Cloud Task that will POST the given ScrapeBinTaskPayload to
+   * `${SERVICE_URL}/scrape-bin`. The endpoint runs that single BIN's BIS +
+   * DOB NOW scrape and writes columns E:H. Returns the created task name.
+   */
+  async createScrapeBinTask(payload: ScrapeBinTaskPayload): Promise<string | null> {
+    if (!this.isConfigured() || !this.client) {
+      console.warn(
+        `createScrapeBinTask called but CloudTasksService not configured; skipping BIN ${payload.bin}`,
+      );
+      return null;
+    }
 
-//     // Create task with OIDC token for authentication
-//     const task: any = {
-//       httpRequest: {
-//         httpMethod: 'POST',
-//         url,
-//         headers: {
-//           'Content-Type': 'application/json',
-//         },
-//         body: Buffer.from(JSON.stringify(payload)).toString('base64'),
-//       },
-//     };
+    const parent = this.client.queuePath(
+      this.projectId,
+      this.location,
+      this.queueName,
+    );
 
-//     // Add OIDC token if service account is provided
-//     if (this.serviceAccountEmail) {
-//       task.httpRequest.oidcToken = {
-//         serviceAccountEmail: this.serviceAccountEmail,
-//         audience: url,
-//       };
-//     }
+    const url = `${this.serviceUrl}/scrape-bin`;
+    const body = Buffer.from(JSON.stringify(payload)).toString('base64');
 
-//     // Send create task request
-//     const [response] = await this.client.createTask({
-//       parent,
-//       task,
-//     });
+    const task: any = {
+      httpRequest: {
+        httpMethod: 'POST',
+        url,
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body,
+      },
+      // Cloud Run service has --timeout 3600; each per-BIN scrape comfortably
+      // fits, so we don't need to shorten the dispatch deadline.
+    };
 
-//     console.log(`Created task: ${response.name}`);
-//     return response.name as string;
-//   }
+    if (this.serviceAccountEmail) {
+      task.httpRequest.oidcToken = {
+        serviceAccountEmail: this.serviceAccountEmail,
+        audience: this.serviceUrl,
+      };
+    }
 
-//   /**
-//    * Creates a task to run Project 2
-//    * @returns The created task name
-//    */
-//   async createRunProject2Task(): Promise<string> {
-//     return this.createProcessBinsTask([], '/run-project2');
-//   }
-// }
+    try {
+      const [response] = await this.client.createTask({ parent, task });
+      const name = (response.name as string) || '(unnamed)';
+      console.log(`Enqueued scrape task for BIN ${payload.bin}: ${name}`);
+      return name;
+    } catch (err) {
+      console.error(`Failed to enqueue scrape task for BIN ${payload.bin}:`, err);
+      throw err;
+    }
+  }
+}

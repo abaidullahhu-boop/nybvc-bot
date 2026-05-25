@@ -196,6 +196,55 @@ const server = http.createServer(async (req, res) => {
       });
 
     // -----------------------------------------------------------------------
+    // /scrape-bin — single-BIN scrape dispatched by Cloud Tasks during Phase 3
+    // Body: { bin, rowIndex, sheetName, priorNotes }
+    // Each request handles one BIN end-to-end (BIS -> DOB NOW -> sheet update)
+    // and stays well under the 60-minute Cloud Run timeout.
+    // -----------------------------------------------------------------------
+    } else if (path === '/scrape-bin') {
+      const { bin, rowIndex, sheetName, priorNotes } = requestData || {};
+
+      if (!bin || !rowIndex || !sheetName) {
+        sendResponse(res, 400, {
+          status: 'error',
+          message:
+            'Request must include "bin", "rowIndex", and "sheetName" fields',
+        });
+        return;
+      }
+
+      console.log(
+        `Received /scrape-bin: bin=${bin}, rowIndex=${rowIndex}, sheetName=${sheetName}`,
+      );
+
+      const { appService, dobScraperService } = createServices();
+
+      try {
+        await dobScraperService.initializeBrowser();
+        await appService.scrapeSingleBin(
+          String(bin),
+          Number(rowIndex),
+          String(sheetName),
+          Array.isArray(priorNotes) ? priorNotes : [],
+        );
+        sendResponse(res, 200, {
+          status: 'success',
+          message: `Scraped BIN ${bin} at row ${rowIndex}`,
+        });
+      } catch (error) {
+        console.error(`/scrape-bin failed for BIN ${bin}:`, error);
+        sendResponse(res, 500, {
+          status: 'error',
+          message: `Error scraping BIN ${bin}`,
+          error: error.message,
+        });
+      } finally {
+        await dobScraperService.cleanup().catch((err) => {
+          console.error('Browser cleanup failed:', err);
+        });
+      }
+
+    // -----------------------------------------------------------------------
     // /run-project2 — manually trigger Project 2 violation emails only
     // -----------------------------------------------------------------------
     } else if (path === '/run-project2') {

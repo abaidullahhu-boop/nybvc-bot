@@ -16,6 +16,7 @@ import { GoogleSheetService } from './google-sheet.service';
 import { GoogleSearchService } from './google-search.service';
 import { formatReasonFromNotes, DiagnosticNote } from './contact-extraction.types';
 import { JobApplicationContact } from './job-application-contact.types';
+import { CloudTasksService } from './cloud-tasks.service';
 import { Datastore } from '@google-cloud/datastore';
 import * as moment from 'moment-timezone';
 
@@ -30,6 +31,7 @@ export class AppService {
     private readonly dobScraperService: DobScraperService,
     private readonly googleSheetService: GoogleSheetService,
     private readonly googleSearchService: GoogleSearchService,
+    private readonly cloudTasksService?: CloudTasksService,
   ) {}
 
   async handleDailyTasks() {
@@ -105,7 +107,6 @@ export class AppService {
     }
 
     // Per-BIN state shared across phases
-    const rowIndexByBin = new Map<string, number>();
     const apiContactByBin = new Map<string, JobApplicationContact | null>();
     const notesByBin = new Map<string, DiagnosticNote[]>();
     for (const bin of binsToProcess) {
@@ -114,8 +115,11 @@ export class AppService {
 
     // ------------------------------------------------------------------
     // Phase 1 — NYC Open Data API: name + phone for every BIN
+    // (single batched sheet append at the end to avoid 60/min write quota)
     // ------------------------------------------------------------------
     console.log(`Phase 1: fetching Open Data API contacts for ${binsToProcess.length} BINs`);
+    const phase1Rows: any[][] = [];
+    const phase1Bins: string[] = [];
     for (const bin of binsToProcess) {
       try {
         const apiContact =
@@ -125,7 +129,7 @@ export class AppService {
         const phone = apiContact?.phoneNumber?.trim() || '';
         const name = apiContact?.name?.trim() || '';
 
-        const row = [
+        phase1Rows.push([
           bin,
           '',
           phone || 'Phone not found',
@@ -134,26 +138,40 @@ export class AppService {
           '',
           'no',
           '',
-        ];
-
-        const rowIndex = await this.googleSheetService.appendRowReturningIndex(
-          sheetId,
-          sheetName,
-          row,
-        );
-        rowIndexByBin.set(bin, rowIndex);
+        ]);
+        phase1Bins.push(bin);
         console.log(
-          `Phase 1 BIN ${bin} -> row ${rowIndex}: name=${name || 'N/A'}, phone=${phone || 'N/A'}`,
+          `Phase 1 BIN ${bin}: name=${name || 'N/A'}, phone=${phone || 'N/A'}`,
         );
       } catch (error) {
-        console.error(`Phase 1 failed for BIN ${bin}:`, error);
+        console.error(`Phase 1 API failed for BIN ${bin}:`, error);
+      }
+    }
+
+    const rowIndexByBin = new Map<string, number>();
+    if (phase1Rows.length > 0) {
+      try {
+        const indexes = await this.googleSheetService.appendRowsReturningIndexes(
+          sheetId,
+          sheetName,
+          phase1Rows,
+        );
+        indexes.forEach((idx, i) => rowIndexByBin.set(phase1Bins[i], idx));
+        console.log(
+          `Phase 1 batch-appended ${phase1Rows.length} rows (rows ${indexes[0]}-${indexes[indexes.length - 1]})`,
+        );
+      } catch (error) {
+        console.error('Phase 1 batch append failed; aborting run:', error);
+        return;
       }
     }
 
     // ------------------------------------------------------------------
     // Phase 2 — SerpAPI: email for every BIN
+    // (single batchUpdate at the end to avoid the same Sheets write quota)
     // ------------------------------------------------------------------
     console.log(`Phase 2: SerpAPI email lookup for ${binsToProcess.length} BINs`);
+    const phase2Updates: { a1Range: string; values: any[][] }[] = [];
     for (const bin of binsToProcess) {
       const rowIndex = rowIndexByBin.get(bin);
       if (!rowIndex) {
@@ -166,98 +184,175 @@ export class AppService {
         );
         notesByBin.get(bin)!.push(...webSearch.notes);
         const email = webSearch.email?.trim() || '';
-        await this.googleSheetService.updateRange(
-          sheetId,
-          sheetName,
-          `B${rowIndex}`,
-          [[email || 'Email not found']],
-        );
+        phase2Updates.push({
+          a1Range: `B${rowIndex}`,
+          values: [[email || 'Email not found']],
+        });
         console.log(
           `Phase 2 BIN ${bin} -> row ${rowIndex}: email=${email || 'N/A'}`,
         );
       } catch (error) {
-        console.error(`Phase 2 failed for BIN ${bin}:`, error);
+        console.error(`Phase 2 SerpAPI failed for BIN ${bin}:`, error);
+      }
+    }
+    if (phase2Updates.length > 0) {
+      try {
+        await this.googleSheetService.batchUpdateRanges(
+          sheetId,
+          sheetName,
+          phase2Updates,
+        );
+      } catch (error) {
+        console.error('Phase 2 batch update failed:', error);
       }
     }
 
     // ------------------------------------------------------------------
     // Phase 3 — Scraping (BIS -> DOB NOW): scrapedEmail + scraped flag
+    //
+    // If Cloud Tasks is configured (CLOUD_TASKS_QUEUE_NAME + SERVICE_URL set
+    // and the service is constructed with a CloudTasksService), enqueue one
+    // task per BIN to /scrape-bin and return immediately — this keeps the
+    // top-level /process-bins or /trigger request well under Cloud Run's
+    // 60-minute timeout. Otherwise fall back to the in-process loop (used in
+    // local development).
     // ------------------------------------------------------------------
-    console.log(`Phase 3: scraping BIS/DOB NOW for ${binsToProcess.length} BINs`);
-    try {
-      await this.dobScraperService.initializeBrowser();
+    const canFanout =
+      !!this.cloudTasksService &&
+      this.cloudTasksService.isConfigured();
+
+    if (canFanout) {
+      console.log(
+        `Phase 3: enqueueing ${binsToProcess.length} Cloud Tasks to /scrape-bin`,
+      );
+      let enqueued = 0;
       for (const bin of binsToProcess) {
         const rowIndex = rowIndexByBin.get(bin);
         if (!rowIndex) {
           console.warn(`Phase 3 skipped for BIN ${bin}: no row index`);
           continue;
         }
-
-        console.log(`Phase 3 processing BIN ${bin} (row ${rowIndex})`);
-        // Keep the 1-3 minute random delay here (Akamai)
-        const waitTime = Math.floor(Math.random() * 120000) + 60000;
-        console.log(`Phase 3 waiting ${(waitTime / 60000).toFixed(2)} minutes before BIN ${bin}...`);
-        await new Promise((resolve) => setTimeout(resolve, waitTime));
-
-        let scrapedEmail = '';
-        let deniedUrl = '';
         try {
-          const bisOutcome = await this.dobScraperService.getBisContactInfo(bin);
-          notesByBin.get(bin)!.push(...bisOutcome.notes);
-          scrapedEmail = bisOutcome.contact.email?.trim() || '';
-          deniedUrl =
-            bisOutcome.lastAttemptedUrl || bisOutcome.deniedUrl || '';
-
-          if (!scrapedEmail) {
-            const dobNowOutcome =
-              await this.dobScraperService.scrapeDobNow(bin);
-            notesByBin.get(bin)!.push(...dobNowOutcome.notes);
-            if (!deniedUrl && dobNowOutcome.deniedUrl) {
-              deniedUrl = dobNowOutcome.deniedUrl;
-            }
-            if (!deniedUrl && dobNowOutcome.lastAttemptedUrl) {
-              deniedUrl = dobNowOutcome.lastAttemptedUrl;
-            }
-            scrapedEmail = dobNowOutcome.contact.email?.trim() || '';
-          }
-        } catch (error) {
-          console.error(`Phase 3 scrape failed for BIN ${bin}:`, error);
-          notesByBin.get(bin)!.push({
-            stage: 'scrape',
-            code: 'SCRAPE_ERROR',
-            detail: error instanceof Error ? error.message : String(error),
-          });
-        }
-
-        const notes = notesByBin.get(bin)!;
-        const reason = notes.length > 0 ? formatReasonFromNotes(notes) : '';
-
-        try {
-          await this.googleSheetService.updateRange(
-            sheetId,
+          await this.cloudTasksService!.createScrapeBinTask({
+            bin,
+            rowIndex,
             sheetName,
-            `E${rowIndex}:H${rowIndex}`,
-            [[
-              deniedUrl || '',
-              reason,
-              'yes',
-              scrapedEmail || 'Email not found',
-            ]],
-          );
-          console.log(
-            `Phase 3 BIN ${bin} -> row ${rowIndex}: scrapedEmail=${scrapedEmail || 'N/A'}, deniedUrl=${deniedUrl || 'N/A'}`,
-          );
+            priorNotes: notesByBin.get(bin) || [],
+          });
+          enqueued++;
         } catch (error) {
-          console.error(`Phase 3 sheet update failed for BIN ${bin}:`, error);
+          console.error(`Phase 3 enqueue failed for BIN ${bin}:`, error);
         }
       }
-    } catch (error) {
-      console.error('Phase 3 workflow failed:', error);
-    } finally {
-      await this.dobScraperService.cleanup();
+      console.log(
+        `Phase 3: enqueued ${enqueued}/${binsToProcess.length} scrape tasks. Cloud Tasks will dispatch them asynchronously.`,
+      );
+    } else {
+      console.log(
+        `Phase 3: Cloud Tasks not configured; scraping BIS/DOB NOW in-process for ${binsToProcess.length} BINs`,
+      );
+      try {
+        await this.dobScraperService.initializeBrowser();
+        for (const bin of binsToProcess) {
+          const rowIndex = rowIndexByBin.get(bin);
+          if (!rowIndex) {
+            console.warn(`Phase 3 skipped for BIN ${bin}: no row index`);
+            continue;
+          }
+
+          console.log(`Phase 3 processing BIN ${bin} (row ${rowIndex})`);
+          const waitTime = Math.floor(Math.random() * 120000) + 60000;
+          console.log(`Phase 3 waiting ${(waitTime / 60000).toFixed(2)} minutes before BIN ${bin}...`);
+          await new Promise((resolve) => setTimeout(resolve, waitTime));
+
+          await this.scrapeSingleBin(
+            bin,
+            rowIndex,
+            sheetName,
+            notesByBin.get(bin) || [],
+            sheetId,
+          );
+        }
+      } catch (error) {
+        console.error('Phase 3 in-process workflow failed:', error);
+      } finally {
+        await this.dobScraperService.cleanup();
+      }
     }
 
-    console.log('Project 1 workflow completed.');
+    console.log('Project 1 workflow completed (Phase 3 may still be running in the background via Cloud Tasks).');
+  }
+
+  /**
+   * Scrape one BIN end-to-end (BIS, then DOB NOW if no email), accumulate
+   * Phase 2 + scrape notes, and write columns E:H for the BIN's row.
+   * Used both by the in-process Phase 3 fallback and by the /scrape-bin
+   * HTTP endpoint that Cloud Tasks dispatches to.
+   *
+   * Browser lifecycle: callers are responsible for `initializeBrowser` and
+   * `cleanup`. The /scrape-bin endpoint initializes a browser per request and
+   * cleans up at the end of the request.
+   */
+  async scrapeSingleBin(
+    bin: string,
+    rowIndex: number,
+    sheetName: string,
+    priorNotes: DiagnosticNote[],
+    sheetIdOverride?: string,
+  ): Promise<void> {
+    const sheetId = sheetIdOverride || process.env.PROJECT1_GOOGLE_SHEET_ID;
+    if (!sheetId) {
+      console.error(
+        'scrapeSingleBin: PROJECT1_GOOGLE_SHEET_ID env var is required',
+      );
+      return;
+    }
+
+    const notes: DiagnosticNote[] = [...priorNotes];
+    let scrapedEmail = '';
+    let deniedUrl = '';
+    try {
+      const bisOutcome = await this.dobScraperService.getBisContactInfo(bin);
+      notes.push(...bisOutcome.notes);
+      scrapedEmail = bisOutcome.contact.email?.trim() || '';
+      deniedUrl =
+        bisOutcome.lastAttemptedUrl || bisOutcome.deniedUrl || '';
+
+      if (!scrapedEmail) {
+        const dobNowOutcome = await this.dobScraperService.scrapeDobNow(bin);
+        notes.push(...dobNowOutcome.notes);
+        if (!deniedUrl && dobNowOutcome.deniedUrl) {
+          deniedUrl = dobNowOutcome.deniedUrl;
+        }
+        if (!deniedUrl && dobNowOutcome.lastAttemptedUrl) {
+          deniedUrl = dobNowOutcome.lastAttemptedUrl;
+        }
+        scrapedEmail = dobNowOutcome.contact.email?.trim() || '';
+      }
+    } catch (error) {
+      console.error(`scrapeSingleBin scrape failed for BIN ${bin}:`, error);
+      notes.push({
+        stage: 'scrape',
+        code: 'SCRAPE_ERROR',
+        detail: error instanceof Error ? error.message : String(error),
+      });
+    }
+
+    const reason = notes.length > 0 ? formatReasonFromNotes(notes) : '';
+
+    try {
+      await this.googleSheetService.updateRange(
+        sheetId,
+        sheetName,
+        `E${rowIndex}:H${rowIndex}`,
+        [[deniedUrl || '', reason, 'yes', scrapedEmail || 'Email not found']],
+      );
+      console.log(
+        `scrapeSingleBin BIN ${bin} -> row ${rowIndex}: scrapedEmail=${scrapedEmail || 'N/A'}, deniedUrl=${deniedUrl || 'N/A'}`,
+      );
+    } catch (error) {
+      console.error(`scrapeSingleBin sheet update failed for BIN ${bin}:`, error);
+    }
   }
 
   private async tryWebSearchEmail(

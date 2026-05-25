@@ -110,6 +110,62 @@ export class GoogleSheetService {
   }
 
   /**
+   * Append multiple rows in a single API call and return the 1-based row index
+   * of every inserted row. Avoids the 60-writes-per-minute Sheets quota that
+   * one-append-per-row triggers on large BIN batches.
+   *
+   * Parses the start row from `updates.updatedRange` (e.g. `'05/25/2026'!A12:H101`)
+   * and assigns indexes `startRow + i` for each row in order. Falls back to
+   * re-reading the sheet length if parsing fails.
+   */
+  async appendRowsReturningIndexes(
+    spreadsheetId: string,
+    sheetName: string,
+    rows: any[][],
+  ): Promise<number[]> {
+    if (rows.length === 0) {
+      return [];
+    }
+    try {
+      const response = await this.sheets.spreadsheets.values.append({
+        spreadsheetId,
+        range: sheetName,
+        valueInputOption: 'RAW',
+        insertDataOption: 'INSERT_ROWS',
+        resource: {
+          values: rows,
+        },
+      });
+
+      const updatedRange: string | undefined =
+        response?.data?.updates?.updatedRange;
+      if (updatedRange) {
+        const match = updatedRange.match(/![A-Z]+(\d+)(?::[A-Z]+(\d+))?$/);
+        if (match) {
+          const startRow = parseInt(match[1], 10);
+          if (!Number.isNaN(startRow)) {
+            const indexes = rows.map((_, i) => startRow + i);
+            console.log(
+              `Appended ${rows.length} rows to ${sheetName} (rows ${startRow}-${startRow + rows.length - 1}) in spreadsheet ${spreadsheetId}`,
+            );
+            return indexes;
+          }
+        }
+        console.warn(
+          `Could not parse start row from updatedRange "${updatedRange}"; falling back to sheet length`,
+        );
+      }
+
+      const existing = await this.getSheetData(spreadsheetId, sheetName);
+      const startRow = existing.length - rows.length + 1;
+      return rows.map((_, i) => startRow + i);
+    } catch (error) {
+      console.error(`Failed to append rows (batch): ${error.message}`);
+      throw error;
+    }
+  }
+
+  /**
    * Overwrite a specific A1 range (e.g. `B12` or `E12:H12`) with the provided
    * values. Used to progressively fill in per-phase data on a row that was
    * previously appended via appendRowReturningIndex.
@@ -134,6 +190,41 @@ export class GoogleSheetService {
       );
     } catch (error) {
       console.error(`Failed to update range ${a1Range}: ${error.message}`);
+      throw error;
+    }
+  }
+
+  /**
+   * Update many disjoint ranges in a single API call via
+   * `spreadsheets.values.batchUpdate`. Each entry is `{ a1Range, values }`
+   * where a1Range may be a single cell (`B12`) or a contiguous range
+   * (`E12:H12`). Avoids the per-minute write quota when several updates need
+   * to happen in quick succession (e.g. Phase 2 email updates for many BINs).
+   */
+  async batchUpdateRanges(
+    spreadsheetId: string,
+    sheetName: string,
+    updates: { a1Range: string; values: any[][] }[],
+  ): Promise<void> {
+    if (updates.length === 0) {
+      return;
+    }
+    try {
+      await this.sheets.spreadsheets.values.batchUpdate({
+        spreadsheetId,
+        resource: {
+          valueInputOption: 'RAW',
+          data: updates.map((u) => ({
+            range: `${sheetName}!${u.a1Range}`,
+            values: u.values,
+          })),
+        },
+      });
+      console.log(
+        `Batch-updated ${updates.length} ranges in ${sheetName} (spreadsheet ${spreadsheetId})`,
+      );
+    } catch (error) {
+      console.error(`Failed to batch update ranges: ${error.message}`);
       throw error;
     }
   }
